@@ -25,7 +25,7 @@ MESES_SEM_ACENTO = {
 
 CATEGORIAS_REC = [
     "Receita Tributaria", "Receita Patrimonial", "Receita de Servicos",
-    "Receitas Correntes", "Demais Receitas"
+    "Repasses Correntes", "Demais Receitas"
 ]
 
 st.markdown(
@@ -494,6 +494,17 @@ with st.sidebar:
         conn_r.commit()
         conn_r.close()
         st.success("Tabela '" + tabela_rest + "' restaurada!")
+        st.rerun()
+
+    st.divider()
+    if st.button("Corrigir categoria Repasses -> Receita Corrente"):
+        conn_fix = sqlite3.connect(DB_NAME)
+        n = conn_fix.execute(
+            "UPDATE receitas SET categoria='Receita Corrente' WHERE categoria='Repasses Correntes'"
+        ).rowcount
+        conn_fix.commit()
+        conn_fix.close()
+        st.success(str(n) + " registros corrigidos.")
         st.rerun()
 
     st.divider()
