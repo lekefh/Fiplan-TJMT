@@ -25,7 +25,7 @@ MESES_SEM_ACENTO = {
 
 CATEGORIAS_REC = [
     "Receita Tributaria", "Receita Patrimonial", "Receita de Servicos",
-    "Receitas Correntes", "Demais Receitas"
+    "Receita Corrente", "Demais Receitas"
 ]
 
 st.markdown(
