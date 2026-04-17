@@ -2,198 +2,914 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import plotly.graph_objects as go
-import re
-import io
 import unicodedata
+import re
 
-# --- CONFIGURAÇÃO ---
 DB_NAME = 'dados_gestao_integrada.db'
-st.set_page_config(page_title="FIPLAN - GESTÃO INTEGRADA", layout="wide")
+st.set_page_config(page_title="FIPLAN - GESTAO INTEGRADA", layout="wide")
+st.markdown(
+    "<h2 style='text-align:center;margin-bottom:0'>UO 03601 - FUNAJURIS</h2>"
+    "<p style='text-align:center;color:#888;margin-top:0'>"
+    "Gestao Financeira Integrada - FIPLAN</p>",
+    unsafe_allow_html=True
+)
 
-MESES_NOMES = ["Jan", "Fev", "Mar", "Abr", "Maio", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
-MESES_MAPA = {
-    "JANEIRO": 1, "FEVEREIRO": 2, "MARÇO": 3, "ABRIL": 4, "MAIO": 5, "JUNHO": 6,
-    "JULHO": 7, "AGOSTO": 8, "SETEMBRO": 9, "OUTUBRO": 10, "NOVEMBRO": 11, "DEZEMBRO": 12
+MESES_NOMES = ["Jan", "Fev", "Mar", "Abr", "Maio", "Jun",
+               "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+
+MESES_SEM_ACENTO = {
+    "JANEIRO": 1, "FEVEREIRO": 2, "MARCO": 3, "ABRIL": 4,
+    "MAIO": 5, "JUNHO": 6, "JULHO": 7, "AGOSTO": 8,
+    "SETEMBRO": 9, "OUTUBRO": 10, "NOVEMBRO": 11, "DEZEMBRO": 12
 }
-BIMESTRES = {
-    "1º Bimestre (Jan-Fev)": [1, 2],
-    "2º Bimestre (Mar-Abr)": [3, 4],
-    "3º Bimestre (Mai-Jun)": [5, 6],
-    "4º Bimestre (Jul-Ago)": [7, 8],
-    "5º Bimestre (Set-Out)": [9, 10],
-    "6º Bimestre (Nov-Dez)": [11, 12]
-}
-CATEGORIAS_REC = ["Receita Tributária", "Receita Patrimonial", "Receita de Serviços", "Repasses Correntes", "Demais Receitas"]
 
-st.markdown("<style>[data-testid='stMetricValue'] { font-size: 1.4rem !important; font-weight: 700; }</style>", unsafe_allow_html=True)
+CATEGORIAS_REC = [
+    "Receita Tributaria", "Receita Patrimonial", "Receita de Servicos",
+    "Repasses Correntes", "Demais Receitas"
+]
 
-# --- FUNÇÕES AUXILIARES ---
-def inicializar_banco():
-    conn = sqlite3.connect(DB_NAME)
-    conn.execute('''CREATE TABLE IF NOT EXISTS receitas (mes INTEGER, ano INTEGER, codigo_full TEXT, natureza TEXT, orcado REAL, realizado REAL, previsao REAL, categoria TEXT DEFAULT 'Não Classificada')''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS despesas (mes INTEGER, ano INTEGER, uo TEXT, ug TEXT, funcao TEXT, subfuncao TEXT, programa TEXT, projeto TEXT, natureza TEXT, fonte TEXT, orcado_inicial REAL, cred_autorizado REAL, empenhado REAL, liquidado REAL, pago REAL)''')
-    conn.close()
+st.markdown(
+    "<style>[data-testid='stMetricValue']"
+    "{font-size:1.4rem!important;font-weight:700}</style>",
+    unsafe_allow_html=True
+)
+
+
+# ---------------------------------------------------------------------------
+# AUXILIARES
+# ---------------------------------------------------------------------------
+def sem_acento(txt):
+    return "".join(
+        c for c in unicodedata.normalize("NFD", txt)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def detectar_mes(arquivo):
+    m_final = 1
+    try:
+        df_scan = pd.read_excel(arquivo, nrows=12, header=None)
+        for r in range(len(df_scan)):
+            for celula in df_scan.iloc[r]:
+                txt = sem_acento(str(celula)).upper()
+                for nome, num in MESES_SEM_ACENTO.items():
+                    if nome in txt:
+                        m_final = num
+    except Exception:
+        pass
+    return m_final
+
 
 def limpar_f(v):
-    if pd.isna(v) or v == "" or v == "-": return 0.0
-    if isinstance(v, (int, float)): return float(v)
-    v = str(v).replace('"', '').replace('.', '').replace(',', '.')
-    try: return float(v)
-    except: return 0.0
+    if pd.isna(v) or str(v).strip() in ("", "-", "nan"):
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace('"', "").replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
 
-def normalizar_chave(v):
-    if pd.isna(v): return ""
-    s = str(v).strip().replace('"', '')
+
+def norm(v):
+    if pd.isna(v):
+        return ""
+    s = str(v).strip().replace('"', "").replace("\xa0", "")
     try:
         f = float(s)
-        return str(int(f)) if f.is_integer() else s
-    except: return s
+        if f == int(f):
+            return str(int(f))
+    except Exception:
+        pass
+    return s
 
-def gerar_excel_lrf(df_final):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_final.to_excel(writer, index=False, sheet_name='Anexo_LRF')
-    return output.getvalue()
+
+# ---------------------------------------------------------------------------
+# BANCO DE DADOS
+# ---------------------------------------------------------------------------
+def inicializar_banco():
+    conn = sqlite3.connect(DB_NAME)
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS receitas ("
+        "mes INTEGER, ano INTEGER, codigo_full TEXT, natureza TEXT, "
+        "orcado REAL, realizado REAL, previsao REAL, "
+        "categoria TEXT DEFAULT 'Nao Classificada')"
+    )
+    try:
+        conn.execute(
+            "ALTER TABLE receitas ADD COLUMN categoria TEXT DEFAULT 'Nao Classificada'"
+        )
+    except Exception:
+        pass
+
+    # Orcamento: importado da FIP 616 (dotacao / credito autorizado)
+    # Colunas 616: [0]PODER [1]UO [2]UG [3]FUNCAO [4]SUBFUNCAO [5]PROGRAMA
+    #              [6]PAOE  [7]NATUREZA [8]MODALIDADE [9]ELEMENTO [10]FONTE
+    #              [11]ORCADO INICIAL  [12]CREDITO AUTORIZADO
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS orcamento ("
+        "mes INTEGER, ano INTEGER, uo TEXT, ug TEXT, funcao TEXT, subfuncao TEXT, "
+        "programa TEXT, projeto TEXT, natureza TEXT, fonte TEXT, "
+        "orcado_inicial REAL, cred_autorizado REAL)"
+    )
+
+    # Execucao: importado da FIP 613 (valores mensais diretos, nao acumulados)
+    # Colunas 613: [0]UO [1]UG [2]FUNCAO [3]SUBFUNCAO [4]PROGRAMA [5]PROJETO
+    #              [6]REGIONAL [7]NATUREZA [8]FONTE [9]IDUSO [10]TIPO_REC
+    #              [21]EMPENHADO [22]LIQUIDADO [24]VALOR PAGO
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS execucao ("
+        "mes INTEGER, ano INTEGER, uo TEXT, ug TEXT, funcao TEXT, subfuncao TEXT, "
+        "programa TEXT, projeto TEXT, regional TEXT, natureza TEXT, fonte TEXT, "
+        "iduso TEXT, tipo_rec TEXT, "
+        "empenhado REAL, liquidado REAL, pago REAL)"
+    )
+
+    # Recria sub_elementos se a coluna fonte nao estiver na posicao correta
+    # (problema de ALTER TABLE que adiciona ao final, causando mapeamento errado)
+    cols_sub = [r[1] for r in conn.execute("PRAGMA table_info(sub_elementos)").fetchall()]
+    schema_correto = (
+        cols_sub == ["mes", "ano", "paoe", "natureza_cod", "natureza_desc",
+                     "subelemento_cod", "subelemento_desc", "fonte", "liquidado", "pago"]
+    )
+    if not schema_correto:
+        conn.execute("DROP TABLE IF EXISTS sub_elementos")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sub_elementos ("
+        "mes INTEGER, ano INTEGER, paoe TEXT, natureza_cod TEXT, natureza_desc TEXT, "
+        "subelemento_cod TEXT, subelemento_desc TEXT, fonte TEXT, "
+        "liquidado REAL, pago REAL)"
+    )
+    conn.commit()
+    conn.close()
+
+
+def limpar_todos_dados():
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute("DELETE FROM receitas")
+    conn.execute("DELETE FROM orcamento")
+    conn.execute("DELETE FROM execucao")
+    conn.execute("DELETE FROM sub_elementos")
+    try:
+        conn.execute("DELETE FROM despesas")
+    except Exception:
+        pass
+    conn.commit()
+    conn.close()
+
 
 inicializar_banco()
 
-# --- SIDEBAR ---
+
+# ---------------------------------------------------------------------------
+# SIDEBAR
+# ---------------------------------------------------------------------------
 with st.sidebar:
-    st.subheader("📥 Importar Dados")
-    tipo_dado = st.radio("Tipo:", ["Receita", "Despesa"])
-    arquivo = st.file_uploader(f"Arquivo {tipo_dado}", type=["xlsx"])
+    st.subheader("Importar Dados")
+    tipo_dado = st.radio(
+        "Tipo:", [
+            "Receita (FIP 729)",
+            "Orcamento (FIP 616)",
+            "Execucao (FIP 613)",
+            "Sub-elemento (FIP 701)"
+        ]
+    )
+    arquivo = st.file_uploader("Arquivo Excel", type=["xlsx"])
 
-    if arquivo and st.button("🚀 Processar Dados"):
-        m_final = 1
-        df_scan = pd.read_excel(arquivo, nrows=10, header=None)
-        for r in range(len(df_scan)):
-            for celula in df_scan.iloc[r]:
-                for nome, num in MESES_MAPA.items():
-                    if nome in str(celula).upper(): m_final = num
+    if arquivo and st.button("Processar Dados"):
+        try:
+            m_final = detectar_mes(arquivo)
+            conn = sqlite3.connect(DB_NAME)
 
-        conn = sqlite3.connect(DB_NAME)
-        if tipo_dado == "Receita":
-            df = pd.read_excel(arquivo, skiprows=7)
-            dados = []
-            for _, row in df.iterrows():
-                cod = str(row.iloc[0]).strip().replace('"', '')
-                if re.match(r'^\d', cod) and cod[-1] != '0':
-                    real = limpar_f(row.iloc[6])
-                    if cod.startswith('9'): real = -abs(real)
-                    cur = conn.execute("SELECT categoria FROM receitas WHERE codigo_full = ?", (cod,))
-                    r_cat = cur.fetchone()
-                    cat_atual = r_cat[0] if r_cat else "Não Classificada"
-                    dados.append((m_final, 2026, cod, str(row.iloc[1]).replace('"', ''), limpar_f(row.iloc[3]), real, limpar_f(row.iloc[5]), cat_atual))
-            conn.execute("DELETE FROM receitas WHERE ano=2026 AND mes=?", (m_final,))
-            conn.executemany("INSERT INTO receitas VALUES (?,?,?,?,?,?,?,?)", dados)
-        else:
-            df = pd.read_excel(arquivo, skiprows=6); df.columns = df.columns.str.strip().str.upper()
-            linhas = []
-            for _, row in df.iterrows():
-                uo = normalizar_chave(row.get('UO', ''))
-                ug = normalizar_chave(row.get('UG', ''))
-                if uo != "":
-                    elem = limpar_f(row.get('ELEMENTO', 0)); tem_ex = (ug != '0' and elem != 0)
-                    linhas.append({'uo':uo, 'ug':ug, 'funcao':normalizar_chave(row.get('FUNÇÃO', '')), 'subfuncao':normalizar_chave(row.get('SUBFUNÇÃO', '')), 'programa':normalizar_chave(row.get('PROGRAMA', '')), 'projeto':normalizar_chave(row.get('PAOE', '')), 'natureza':normalizar_chave(row.get('NATUREZA DESPESA', '')), 'fonte':normalizar_chave(row.get('FONTE', '')), 'orc_ini':limpar_f(row.get('ORÇADO INICIAL', 0)), 'cred_aut':limpar_f(row.get('CRÉDITO AUTORIZADO', 0)), 'emp_cum':limpar_f(row.get('EMPENHADO', 0)) if tem_ex else 0.0, 'liq_cum':limpar_f(row.get('LIQUIDADO', 0)) if tem_ex else 0.0, 'pag_cum':limpar_f(row.get('PAGO', 0)) if tem_ex else 0.0})
-            
-            if linhas:
-                df_mes = pd.DataFrame(linhas); chaves = ['uo', 'ug', 'funcao', 'subfuncao', 'programa', 'projeto', 'natureza', 'fonte']
-                df_mes = df_mes.groupby(chaves, as_index=False).agg({'orc_ini':'sum', 'cred_aut':'sum', 'emp_cum':'sum', 'liq_cum':'sum', 'pag_cum':'sum'})
-                if m_final > 1:
-                    df_ant = pd.read_sql("SELECT uo, ug, funcao, subfuncao, programa, projeto, natureza, fonte, SUM(empenhado) as e_ant, SUM(liquidado) as l_ant, SUM(pago) as p_ant FROM despesas WHERE ano=2026 AND mes < ? GROUP BY uo, ug, funcao, subfuncao, programa, projeto, natureza, fonte", conn, params=(m_final,))
-                    df_mes = df_mes.merge(df_ant, on=chaves, how='left').fillna(0)
+            # ----------------------------------------------------------------
+            # RECEITA (FIP 729)
+            # skiprows=7: [0]cod [1]natureza [3]orcado [5]previsao [6]realizado
+            # ----------------------------------------------------------------
+            if tipo_dado == "Receita (FIP 729)":
+                df = pd.read_excel(arquivo, skiprows=7, header=0)
+                dados = []
+                for _, row in df.iterrows():
+                    try:
+                        cod = str(row.iloc[0]).strip().replace('"', "")
+                        if not re.match(r"^\d", cod) or cod[-1] == "0":
+                            continue
+                        real = limpar_f(row.iloc[6])
+                        if cod.startswith("9"):
+                            real = -abs(real)
+                        cur = conn.execute(
+                            "SELECT categoria FROM receitas WHERE codigo_full=?", (cod,)
+                        )
+                        r_cat = cur.fetchone()
+                        cat = r_cat[0] if r_cat else "Nao Classificada"
+                        dados.append((
+                            m_final, 2026, cod,
+                            str(row.iloc[1]).replace('"', ""),
+                            limpar_f(row.iloc[3]), real, limpar_f(row.iloc[5]), cat
+                        ))
+                    except Exception:
+                        continue
+                conn.execute(
+                    "DELETE FROM receitas WHERE ano=2026 AND mes=?", (m_final,)
+                )
+                conn.executemany(
+                    "INSERT INTO receitas VALUES (?,?,?,?,?,?,?,?)", dados
+                )
+                conn.commit()
+                st.success(
+                    "Receita " + MESES_NOMES[m_final - 1]
+                    + "/2026: " + str(len(dados)) + " registros"
+                )
+
+            # ----------------------------------------------------------------
+            # ORCAMENTO (FIP 616) - apenas dotacao e credito autorizado
+            # skiprows=6 -> header na linha 6 do Excel (0-indexado)
+            # [0]PODER [1]UO [2]UG [3]FUNCAO [4]SUBFUNCAO [5]PROGRAMA
+            # [6]PAOE  [7]NATUREZA DESPESA [8]MODALIDADE [9]ELEMENTO
+            # [10]FONTE [11]ORCADO INICIAL [12]CREDITO AUTORIZADO
+            # ----------------------------------------------------------------
+            elif tipo_dado == "Orcamento (FIP 616)":
+                df = pd.read_excel(arquivo, skiprows=6, header=0)
+                n = len(df.columns)
+
+                def gc616(row, i, default=0):
+                    return row.iloc[i] if i < n else default
+
+                linhas = []
+                for _, row in df.iterrows():
+                    try:
+                        uo = norm(gc616(row, 1))
+                        if not uo or uo in ("nan", ""):
+                            continue
+                        ug        = norm(gc616(row, 2))
+                        funcao    = norm(gc616(row, 3))
+                        subfuncao = norm(gc616(row, 4))
+                        programa  = norm(gc616(row, 5))
+                        projeto   = norm(gc616(row, 6))
+                        natureza  = norm(gc616(row, 7))
+                        fonte     = norm(gc616(row, 10))
+                        orc_ini   = limpar_f(gc616(row, 11, 0))
+                        cred_aut  = limpar_f(gc616(row, 12, 0))
+                        # Guarda somente linhas com algum valor orcamentario
+                        if orc_ini == 0 and cred_aut == 0:
+                            continue
+                        linhas.append((
+                            m_final, 2026, uo, ug, funcao, subfuncao,
+                            programa, projeto, natureza, fonte,
+                            orc_ini, cred_aut
+                        ))
+                    except Exception:
+                        continue
+
+                conn.execute(
+                    "DELETE FROM orcamento WHERE ano=2026 AND mes=?", (m_final,)
+                )
+                conn.executemany(
+                    "INSERT INTO orcamento VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", linhas
+                )
+                conn.commit()
+                cred_total = sum(r[11] for r in linhas)
+                st.success(
+                    "Orcamento " + MESES_NOMES[m_final - 1] + "/2026: "
+                    + str(len(linhas)) + " linhas | "
+                    + "Cred. Autorizado R$ {:,.0f}".format(cred_total)
+                )
+
+            # ----------------------------------------------------------------
+            # EXECUCAO (FIP 613) - valores mensais diretos (nao acumulados)
+            # skiprows=10 -> header real na linha 10 do Excel (0-indexado)
+            # [0]UO [1]UG [2]FUNCAO [3]SUBFUNCAO [4]PROGRAMA [5]PROJETO
+            # [6]REGIONAL [7]NATUREZA [8]FONTE [9]IDUSO [10]TIPO_REC
+            # [11]DOTACAO INICIAL ... [16]CRED AUTORIZADO ...
+            # [21]EMPENHADO [22]LIQUIDADO [23]A LIQUIDAR [24]VALOR PAGO
+            # ----------------------------------------------------------------
+            elif tipo_dado == "Execucao (FIP 613)":
+                df = pd.read_excel(arquivo, skiprows=10, header=0)
+                n = len(df.columns)
+
+                def gc613(row, i, default=0):
+                    return row.iloc[i] if i < n else default
+
+                linhas = []
+                for _, row in df.iterrows():
+                    try:
+                        uo = norm(gc613(row, 0))
+                        if not uo or uo in ("nan", "", "_"):
+                            continue
+                        # Iduso=NaN indica linhas de TOTAL/SUBTOTAL -> pula
+                        if pd.isna(gc613(row, 9, float("nan"))):
+                            continue
+                        ug        = norm(gc613(row, 1))
+                        funcao    = norm(gc613(row, 2))
+                        subfuncao = norm(gc613(row, 3))
+                        programa  = norm(gc613(row, 4))
+                        projeto   = norm(gc613(row, 5))
+                        regional  = norm(gc613(row, 6))
+                        natureza  = norm(gc613(row, 7))
+                        fonte     = norm(gc613(row, 8))
+                        iduso     = norm(gc613(row, 9))
+                        tipo_rec  = norm(gc613(row, 10))
+                        emp = limpar_f(gc613(row, 21, 0))
+                        liq = limpar_f(gc613(row, 22, 0))
+                        pag = limpar_f(gc613(row, 24, 0))
+                        # Guarda somente linhas com execucao real
+                        if emp == 0 and liq == 0 and pag == 0:
+                            continue
+                        linhas.append((
+                            m_final, 2026, uo, ug, funcao, subfuncao,
+                            programa, projeto, regional, natureza, fonte,
+                            iduso, tipo_rec, emp, liq, pag
+                        ))
+                    except Exception:
+                        continue
+
+                conn.execute(
+                    "DELETE FROM execucao WHERE ano=2026 AND mes=?", (m_final,)
+                )
+                conn.executemany(
+                    "INSERT INTO execucao VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    linhas
+                )
+                conn.commit()
+                ugs = sorted(set(r[3] for r in linhas))
+                emp_t = sum(r[13] for r in linhas)
+                liq_t = sum(r[14] for r in linhas)
+                pag_t = sum(r[15] for r in linhas)
+                st.success(
+                    "Execucao " + MESES_NOMES[m_final - 1] + "/2026: "
+                    + str(len(linhas)) + " linhas | "
+                    + "Emp R$ {:,.0f} | Liq R$ {:,.0f} | Pago R$ {:,.0f}".format(
+                        emp_t, liq_t, pag_t
+                    )
+                )
+                st.info("UGs encontradas: " + str(ugs))
+
+            # ----------------------------------------------------------------
+            # SUB-ELEMENTO (FIP 701)
+            # Estrutura hierarquica: PROJ/ATIV -> NATUREZA -> subelementos
+            # col[0]=descricao  col[1]=LIQUIDADO  col[2]=PAGO
+            # A 701 e acumulada, entao subtrai meses anteriores
+            # ----------------------------------------------------------------
+            elif tipo_dado == "Sub-elemento (FIP 701)":
+                df701 = pd.read_excel(arquivo, header=None)
+                linhas = []
+                cur_paoe = ""
+                cur_nat_cod = ""
+                cur_nat_desc = ""
+
+                for i, row in df701.iterrows():
+                    text = str(row.iloc[0]).strip().replace("\xa0", " ")
+                    if i < 8 or not text or text == "nan":
+                        continue
+                    tu = sem_acento(text).upper()
+
+                    if "PROJ/ATIV" in tu and ":" in tu:
+                        m = re.search(r"(\d{5,8})", text)
+                        if m:
+                            cur_paoe = m.group(1)
+                        continue
+
+                    if "NATUREZA" in tu and "DESPESA" in tu and ":" in tu:
+                        m = re.search(r":\s*(\d+)\s*-\s*(.*)", text)
+                        if m:
+                            cur_nat_cod = m.group(1).strip()
+                            raw = m.group(2).replace("\xa0", " ").strip()
+                            cur_nat_desc = (
+                                raw.split(" - ")[0].strip()
+                                if " - " in raw else raw
+                            )
+                        continue
+
+                    if (tu.startswith("TOTAL") or tu.startswith("CONSOLID")
+                            or tu.startswith("DOTA")):
+                        continue
+
+                    if re.match(r"^\d+\.\d+", text) and cur_paoe and cur_nat_cod:
+                        parts = text.split(" ", 1)
+                        sub_cod  = parts[0].strip()
+                        sub_desc = parts[1].strip() if len(parts) > 1 else ""
+                        # Fonte: ultimo segmento do codigo (ex: 3.3.90.47.47.016.17600000)
+                        fonte_sub = sub_cod.rsplit(".", 1)[-1] if "." in sub_cod else ""
+                        liq_cum  = (
+                            limpar_f(row.iloc[1]) if pd.notna(row.iloc[1]) else 0.0
+                        )
+                        pag_cum  = (
+                            limpar_f(row.iloc[2]) if pd.notna(row.iloc[2]) else 0.0
+                        )
+                        linhas.append({
+                            "paoe": cur_paoe,
+                            "nat_cod": cur_nat_cod,
+                            "nat_desc": cur_nat_desc,
+                            "sub_cod": sub_cod,
+                            "sub_desc": sub_desc,
+                            "fonte": fonte_sub,
+                            "liq_cum": liq_cum,
+                            "pag_cum": pag_cum,
+                        })
+
+                if not linhas:
+                    st.warning("Nenhum sub-elemento valido encontrado.")
                 else:
-                    df_mes['e_ant'] = 0; df_mes['l_ant'] = 0; df_mes['p_ant'] = 0
-                dados = [(m_final, 2026, r['uo'], r['ug'], r['funcao'], r['subfuncao'], r['programa'], r['projeto'], r['natureza'], r['fonte'], r['orc_ini'], r['cred_aut'], r['emp_cum']-r['e_ant'], r['liq_cum']-r['l_ant'], r['pag_cum']-r['p_ant']) for _, r in df_mes.iterrows()]
-                conn.execute("DELETE FROM despesas WHERE ano=2026 AND mes=?", (m_final,))
-                conn.executemany("INSERT INTO despesas VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", dados)
-        conn.commit(); conn.close(); st.rerun()
+                    # A 701 ja traz valores mensais diretos (como a 613).
+                    # Armazenamos os valores do mes sem qualquer subtracao.
+                    chaves_701 = ["paoe", "nat_cod", "sub_cod"]
+                    df_mes = (
+                        pd.DataFrame(linhas)
+                        .groupby(
+                            chaves_701 + ["nat_desc", "sub_desc", "fonte"],
+                            as_index=False
+                        )
+                        .agg(
+                            liq_cum=("liq_cum", "sum"),
+                            pag_cum=("pag_cum", "sum")
+                        )
+                    )
+                    dados = [
+                        (
+                            m_final, 2026,
+                            r.paoe, r.nat_cod, r.nat_desc,
+                            r.sub_cod, r.sub_desc, r.fonte,
+                            float(r.liq_cum), float(r.pag_cum),
+                        )
+                        for r in df_mes.itertuples()
+                    ]
+                    conn.execute(
+                        "DELETE FROM sub_elementos WHERE ano=2026 AND mes=?",
+                        (m_final,)
+                    )
+                    conn.executemany(
+                        "INSERT INTO sub_elementos "
+                        "(mes, ano, paoe, natureza_cod, natureza_desc, "
+                        "subelemento_cod, subelemento_desc, fonte, liquidado, pago) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        dados
+                    )
+                    conn.commit()
+                    liq_t = sum(r[8] for r in dados)
+                    pag_t = sum(r[9] for r in dados)
+                    st.success(
+                        "Sub-elemento " + MESES_NOMES[m_final - 1] + "/2026: "
+                        + str(len(dados)) + " registros | "
+                        + "Liq R$ {:,.0f} | Pago R$ {:,.0f}".format(liq_t, pag_t)
+                    )
+
+            conn.close()
+
+        except Exception as e:
+            st.error("Erro: " + str(e))
+            import traceback
+            st.code(traceback.format_exc())
 
     st.divider()
-    st.subheader("💾 Backup")
-    conn = sqlite3.connect(DB_NAME); df_bkp = pd.read_sql("SELECT * FROM receitas", conn); conn.close()
-    if not df_bkp.empty:
-        st.download_button("📥 Baixar Backup", data=df_bkp.to_csv(index=False).encode('utf-8'), file_name="backup.csv", mime="text/csv")
-    if st.button("🔴 LIMPAR TUDO"):
-        conn = sqlite3.connect(DB_NAME); conn.execute("DELETE FROM receitas"); conn.execute("DELETE FROM despesas"); conn.commit(); conn.close(); st.rerun()
+    st.subheader("Backup Completo")
+    conn_b = sqlite3.connect(DB_NAME)
+    tbls = {
+        "receitas":     pd.read_sql("SELECT * FROM receitas",      conn_b),
+        "orcamento":    pd.read_sql("SELECT * FROM orcamento",     conn_b),
+        "execucao":     pd.read_sql("SELECT * FROM execucao",      conn_b),
+        "sub_elementos":pd.read_sql("SELECT * FROM sub_elementos", conn_b),
+    }
+    conn_b.close()
+    for nome_tab, df_tab in tbls.items():
+        if not df_tab.empty:
+            st.download_button(
+                "Baixar " + nome_tab + " (CSV)",
+                data=df_tab.to_csv(index=False).encode("utf-8"),
+                file_name="backup_" + nome_tab + ".csv",
+                mime="text/csv",
+                key="bkp_" + nome_tab
+            )
+    st.caption("Restaurar tabela (CSV do backup):")
+    tabela_rest = st.selectbox(
+        "Tabela a restaurar:",
+        ["receitas", "orcamento", "execucao", "sub_elementos"],
+        key="tabela_rest"
+    )
+    file_restore = st.file_uploader("Arquivo CSV", type=["csv"], key="file_rest")
+    if file_restore and st.button("Restaurar"):
+        df_res = pd.read_csv(file_restore)
+        conn_r = sqlite3.connect(DB_NAME)
+        df_res.to_sql(tabela_rest, conn_r, if_exists="replace", index=False)
+        conn_r.commit()
+        conn_r.close()
+        st.success("Tabela '" + tabela_rest + "' restaurada!")
+        st.rerun()
 
-# --- CARGA ---
-conn = sqlite3.connect(DB_NAME)
-df_rec = pd.read_sql("SELECT * FROM receitas", conn)
-df_desp = pd.read_sql("SELECT * FROM despesas", conn)
-conn.close()
+    st.divider()
+    st.subheader("Limpeza Geral")
+    confirma = st.checkbox("Confirmo apagar TODOS os dados")
+    if st.button("Limpar Tudo"):
+        if confirma:
+            limpar_todos_dados()
+            st.rerun()
+        else:
+            st.warning("Marque a caixa de confirmacao.")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Receitas", "💸 Despesas", "⚖️ Comparativo", "📄 Relatórios LRF"])
 
+# ---------------------------------------------------------------------------
+# CARGA PRINCIPAL
+# ---------------------------------------------------------------------------
+conn_main = sqlite3.connect(DB_NAME)
+df_rec  = pd.read_sql("SELECT * FROM receitas",      conn_main)
+df_orc  = pd.read_sql("SELECT * FROM orcamento",     conn_main)
+df_exec = pd.read_sql("SELECT * FROM execucao",      conn_main)
+df_sub  = pd.read_sql("SELECT * FROM sub_elementos", conn_main)
+conn_main.close()
+
+tab1, tab2, tab3 = st.tabs(["Receitas", "Despesas", "Comparativo"])
+
+
+# ---------------------------------------------------------------------------
+# ABA 1: RECEITAS
+# ---------------------------------------------------------------------------
 with tab1:
-    if not df_rec.empty:
-        with st.expander("🏷️ Classificar Categorias"):
+    if df_rec.empty:
+        st.info("Importe dados de Receita (FIP 729) para visualizar.")
+    else:
+        with st.expander("Classificar Categorias"):
             c1, c2, c3 = st.columns([2, 2, 1])
-            sel_n = c1.selectbox("Natureza:", sorted(df_rec['natureza'].unique()))
-            sel_c = c2.selectbox("Categoria:", CATEGORIAS_REC)
+            sel_nat = c1.selectbox(
+                "Natureza:", sorted(df_rec["natureza"].unique()), key="sel_nat_c"
+            )
+            sel_cat = c2.selectbox("Categoria:", CATEGORIAS_REC, key="sel_cat_c")
             if c3.button("Salvar"):
-                conn = sqlite3.connect(DB_NAME); conn.execute("UPDATE receitas SET categoria=? WHERE natureza=?", (sel_c, sel_n)); conn.commit(); conn.close(); st.rerun()
-        f1, f2, f3 = st.columns(3)
-        ms_r = f1.multiselect("Meses:", sorted(df_rec['mes'].unique()), default=df_rec['mes'].unique(), format_func=lambda x: MESES_NOMES[x-1], key="msr")
-        ct_r = f2.multiselect("Categoria:", sorted(df_rec['categoria'].unique()), default=sorted(df_rec['categoria'].unique()), key="ctr")
-        nt_r = f3.multiselect("Natureza:", sorted(df_rec['natureza'].unique()), key="ntr")
-        df_rf = df_rec[(df_rec['mes'].isin(ms_r)) & (df_rec['categoria'].isin(ct_r))]
-        if nt_r: df_rf = df_rf[df_rf['natureza'].isin(nt_r)]
-        if not df_rf.empty:
-            v_real = df_rf['realizado'].sum(); v_orc = df_rec[df_rec['mes'] == max(ms_r)].groupby('codigo_full')['orcado'].max().sum()
-            k1, k2, k3 = st.columns(3); k1.metric("Orçado", f"R$ {v_orc:,.2f}"); k2.metric("Realizado", f"R$ {v_real:,.2f}"); k3.metric("Atingimento", f"{(v_real/v_orc*100 if v_orc!=0 else 0):.1f}%")
-            df_g = df_rf.groupby('mes').agg({'realizado':'sum'}).reset_index()
-            df_g['previsao'] = [df_rf[df_rf['mes'] == m].groupby('codigo_full')['previsao'].max().sum() for m in df_g['mes']]
-            fig = go.Figure(); fig.add_trace(go.Bar(x=df_g['mes'].map(lambda x: MESES_NOMES[x-1]), y=df_g['realizado'], name="Realizado", marker_color='#2E7D32'))
-            fig.add_trace(go.Scatter(x=df_g['mes'].map(lambda x: MESES_NOMES[x-1]), y=df_g['previsao'], name="Previsão", line=dict(color='#FF9800', width=3, dash='dot')))
-            fig.update_layout(height=350, margin=dict(l=0,r=0,t=30,b=0), legend=dict(orientation="h", y=1.02, x=1)); st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(df_rf[['categoria', 'natureza', 'realizado', 'orcado']].style.format({'realizado': '{:,.2f}', 'orcado': '{:,.2f}'}), width='stretch')
+                cu = sqlite3.connect(DB_NAME)
+                cu.execute(
+                    "UPDATE receitas SET categoria=? WHERE natureza=?",
+                    (sel_cat, sel_nat)
+                )
+                cu.commit()
+                cu.close()
+                st.rerun()
 
+        st.divider()
+        f1, f2, f3 = st.columns(3)
+        ms_r = f1.multiselect(
+            "Meses:", sorted(df_rec["mes"].unique()),
+            default=list(df_rec["mes"].unique()),
+            format_func=lambda x: MESES_NOMES[x - 1], key="ms_r"
+        )
+        cat_sel = f2.multiselect(
+            "Categoria:", sorted(df_rec["categoria"].unique()),
+            default=list(df_rec["categoria"].unique()), key="cat_r"
+        )
+        nat_sel = f3.multiselect(
+            "Natureza:", sorted(df_rec["natureza"].unique()), key="nat_r"
+        )
+
+        df_rf = df_rec[df_rec["mes"].isin(ms_r) & df_rec["categoria"].isin(cat_sel)]
+        if nat_sel:
+            df_rf = df_rf[df_rf["natureza"].isin(nat_sel)]
+
+        if not df_rf.empty and ms_r:
+            v_real = df_rf["realizado"].sum()
+            v_orc  = (
+                df_rec[df_rec["mes"] == max(ms_r)]
+                .groupby("codigo_full")["orcado"].max().sum()
+            )
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Orcado Atual",  "R$ {:,.2f}".format(v_orc))
+            k2.metric("Realizado",     "R$ {:,.2f}".format(v_real))
+            k3.metric("Atingimento",
+                      "{:.1f}%".format(v_real / v_orc * 100 if v_orc != 0 else 0))
+
+            df_g = df_rf.groupby("mes").agg({"realizado": "sum"}).reset_index()
+            df_g["previsao"] = [
+                df_rf[df_rf["mes"] == m].groupby("codigo_full")["previsao"].max().sum()
+                for m in df_g["mes"]
+            ]
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=[MESES_NOMES[m - 1] for m in df_g["mes"]],
+                y=df_g["realizado"], name="Realizado", marker_color="#2E7D32"
+            ))
+            fig.add_trace(go.Scatter(
+                x=[MESES_NOMES[m - 1] for m in df_g["mes"]],
+                y=df_g["previsao"], name="Previsao",
+                line=dict(color="#FF9800", width=3, dash="dot")
+            ))
+            fig.update_layout(
+                height=350, margin=dict(l=0, r=0, t=30, b=0),
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="right", x=1)
+            )
+            st.plotly_chart(fig, width='stretch')
+            st.dataframe(
+                df_rf[["categoria", "codigo_full", "natureza", "realizado", "orcado"]]
+                .style.format({"realizado": "{:,.2f}", "orcado": "{:,.2f}"}),
+                width='stretch'
+            )
+
+
+# ---------------------------------------------------------------------------
+# ABA 2: DESPESAS
+# Cred. Autorizado: vem da tabela orcamento (FIP 616)
+# Empenhado/Liquidado/Pago: vem da tabela execucao (FIP 613, mensal direto)
+# ---------------------------------------------------------------------------
 with tab2:
-    if not df_desp.empty:
+    has_orc  = not df_orc.empty
+    has_exec = not df_exec.empty
+
+    if not has_orc and not has_exec:
+        st.info(
+            "Importe 'Orcamento (FIP 616)' e 'Execucao (FIP 613)' para visualizar."
+        )
+    else:
+        meses_exec = sorted(df_exec["mes"].unique().tolist()) if has_exec else []
+        ugs_disp   = sorted(df_exec["ug"].unique().tolist())  if has_exec else []
+
         f1, f2, f3 = st.columns(3)
-        ms_d = f1.multiselect("Meses:", sorted(df_desp['mes'].unique()), default=df_desp['mes'].unique(), format_func=lambda x: MESES_NOMES[x-1], key="msd")
-        ug_d = f2.multiselect("UG:", sorted(df_desp['ug'].unique()), default=sorted(df_desp['ug'].unique()), key="ugd")
-        fs_d = f3.multiselect("Função:", sorted(df_desp['funcao'].unique()), key="fsd")
+        ms_d = f1.multiselect(
+            "Meses:", meses_exec, default=meses_exec,
+            format_func=lambda x: MESES_NOMES[x - 1], key="ms_d"
+        )
+        ug_sel = f2.multiselect(
+            "UG (Unidade Gestora):", ugs_disp, default=ugs_disp, key="ug_d"
+        )
+        fs = f3.multiselect(
+            "Funcao:",
+            sorted(df_exec["funcao"].unique()) if has_exec else [],
+            key="func_d"
+        )
+
         f4, f5, f6 = st.columns(3)
-        sf_d = f4.multiselect("Subfunção:", sorted(df_desp['subfuncao'].unique()), key="sfd")
-        ps_d = f5.multiselect("Programa:", sorted(df_desp['programa'].unique()), key="psd")
-        bd_d = f6.text_input("Natureza (Contém):", key="bdd")
-        
-        df_f = df_desp[(df_desp['mes'].isin(ms_d)) & (df_desp['ug'].isin(ug_d))]
-        if fs_d: df_f = df_f[df_f['funcao'].isin(fs_d)]
-        if sf_d: df_f = df_f[df_f['subfuncao'].isin(sf_d)]
-        if ps_d: df_f = df_f[df_f['programa'].isin(ps_d)]
-        if bd_d: df_f = df_f[df_f['natureza'].str.contains(bd_d, case=False, na=False)]
-        
-        if not df_f.empty:
-            m_max = max(ms_d); ch = ['ug', 'funcao', 'subfuncao', 'programa', 'projeto', 'natureza', 'fonte']
-            df_ex = df_f.groupby(ch, as_index=False)[['empenhado', 'liquidado', 'pago']].sum()
-            df_at = df_f[df_f['mes']==m_max].groupby(ch, as_index=False)[['cred_autorizado']].sum()
-            df_v = df_ex.merge(df_at, on=ch, how='left').fillna(0)
-            k1, k2, k3, k4 = st.columns(4); k1.metric("Créd. Aut.", f"R$ {df_v['cred_autorizado'].sum():,.2f}"); k2.metric("Empenhado", f"R$ {df_v['empenhado'].sum():,.2f}"); k3.metric("Liquidado", f"R$ {df_v['liquidado'].sum():,.2f}"); k4.metric("Pago", f"R$ {df_v['pago'].sum():,.2f}")
-            st.dataframe(df_v[['ug', 'funcao', 'subfuncao', 'natureza', 'cred_autorizado', 'empenhado', 'liquidado', 'pago']].style.format({'cred_autorizado': '{:,.2f}', 'empenhado': '{:,.2f}', 'liquidado': '{:,.2f}', 'pago': '{:,.2f}'}), width='stretch')
+        sf = f4.multiselect(
+            "Subfuncao:",
+            sorted(df_exec["subfuncao"].unique()) if has_exec else [],
+            key="subf_d"
+        )
+        ps = f5.multiselect(
+            "Programa:",
+            sorted(df_exec["programa"].unique()) if has_exec else [],
+            key="prog_d"
+        )
+        fts = f6.multiselect(
+            "Fonte:",
+            sorted(df_exec["fonte"].unique()) if has_exec else [],
+            key="font_d"
+        )
+        nats_disp = sorted(df_exec["natureza"].dropna().unique().tolist()) if has_exec else []
+        bd = st.multiselect("Natureza:", nats_disp, key="busca_d")
 
+        # Aplica filtros sobre execucao
+        df_ef = df_exec[df_exec["mes"].isin(ms_d)].copy() if has_exec else pd.DataFrame()
+        if ug_sel and not df_ef.empty:
+            df_ef = df_ef[df_ef["ug"].isin(ug_sel)]
+        if fs and not df_ef.empty:
+            df_ef = df_ef[df_ef["funcao"].isin(fs)]
+        if sf and not df_ef.empty:
+            df_ef = df_ef[df_ef["subfuncao"].isin(sf)]
+        if ps and not df_ef.empty:
+            df_ef = df_ef[df_ef["programa"].isin(ps)]
+        if fts and not df_ef.empty:
+            df_ef = df_ef[df_ef["fonte"].isin(fts)]
+        if bd and not df_ef.empty:
+            df_ef = df_ef[df_ef["natureza"].isin(bd)]
+
+        # KPIs
+        m_max_orc = int(df_orc["mes"].max()) if has_orc else 0
+        m_max_sel = max(ms_d) if ms_d else m_max_orc
+
+        # Cred. Autorizado: sempre do ultimo mes disponivel no orcamento
+        cred_total = (
+            df_orc[df_orc["mes"] == m_max_orc]["cred_autorizado"].sum()
+            if has_orc else 0
+        )
+
+        emp_total = df_ef["empenhado"].sum() if not df_ef.empty else 0
+        liq_total = df_ef["liquidado"].sum() if not df_ef.empty else 0
+        pag_total = df_ef["pago"].sum()      if not df_ef.empty else 0
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric(
+            "Cred. Autorizado (mes " + MESES_NOMES[m_max_orc - 1] + ")",
+            "R$ {:,.2f}".format(cred_total)
+        )
+        k2.metric("Empenhado",  "R$ {:,.2f}".format(emp_total))
+        k3.metric("Liquidado",  "R$ {:,.2f}".format(liq_total))
+        k4.metric("Pago",       "R$ {:,.2f}".format(pag_total))
+
+        if not df_ef.empty:
+            # Grafico mensal de execucao
+            df_g = (
+                df_ef.groupby("mes")[["empenhado", "liquidado", "pago"]]
+                .sum().reset_index()
+            )
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=[MESES_NOMES[m - 1] for m in df_g["mes"]],
+                y=df_g["empenhado"], name="Empenhado", marker_color="#1565C0"
+            ))
+            fig.add_trace(go.Bar(
+                x=[MESES_NOMES[m - 1] for m in df_g["mes"]],
+                y=df_g["liquidado"], name="Liquidado", marker_color="#2E7D32"
+            ))
+            fig.add_trace(go.Bar(
+                x=[MESES_NOMES[m - 1] for m in df_g["mes"]],
+                y=df_g["pago"], name="Pago", marker_color="#E65100"
+            ))
+            fig.update_layout(
+                height=320, barmode="group",
+                margin=dict(l=0, r=0, t=30, b=0),
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="right", x=1)
+            )
+            st.plotly_chart(fig, width='stretch')
+
+            # Tabela agrupada
+            ug_filtrada = set(ug_sel) != set(ugs_disp)
+            col_chave = (["ug"] if ug_filtrada else []) + [
+                "funcao", "subfuncao", "programa", "projeto", "fonte", "natureza"
+            ]
+            df_agg = df_ef.groupby(col_chave, as_index=False)[
+                ["empenhado", "liquidado", "pago"]
+            ].sum()
+
+            st.dataframe(
+                df_agg[col_chave + ["empenhado", "liquidado", "pago"]]
+                .style.format({
+                    "empenhado": "{:,.2f}",
+                    "liquidado": "{:,.2f}",
+                    "pago": "{:,.2f}"
+                }),
+                width='stretch'
+            )
+
+        # Sub-elementos (FIP 701) — valores mensais diretos, soma dos meses selecionados
+        if not df_sub.empty:
+            st.divider()
+            with st.expander("Sub-elementos por PAOE (FIP 701)"):
+                meses_sub = sorted(df_sub["mes"].unique())
+                fontes_sub = (
+                    sorted(df_sub["fonte"].dropna().unique())
+                    if "fonte" in df_sub.columns else []
+                )
+
+                fs1, fs2, fs3 = st.columns(3)
+                ms_s = fs1.multiselect(
+                    "Meses:", meses_sub,
+                    default=meses_sub,
+                    format_func=lambda x: MESES_NOMES[x - 1], key="ms_s"
+                )
+                paoe_s = fs2.multiselect(
+                    "PAOE:", sorted(df_sub["paoe"].unique()), key="paoe_s"
+                )
+                nat_s = fs3.multiselect(
+                    "Natureza:", sorted(df_sub["natureza_cod"].unique()), key="nat_s"
+                )
+
+                fs4, fs5, fs6 = st.columns(3)
+                fonte_s = fs4.multiselect(
+                    "Fonte:", fontes_sub, key="fonte_s"
+                )
+                # Sub-elemento: busca por codigo ou descricao, depois multiselect
+                sub_busca = fs5.text_input(
+                    "Buscar sub-elemento (cod. ou desc.):",
+                    key="sub_busca",
+                    placeholder="Ex: 90.14.14.001 ou Diarias"
+                )
+                if sub_busca:
+                    mask_sub = (
+                        df_sub["subelemento_cod"].str.contains(sub_busca, case=False, na=False)
+                        | df_sub["subelemento_desc"].str.contains(sub_busca, case=False, na=False)
+                    )
+                    subs_disp = sorted(df_sub.loc[mask_sub, "subelemento_desc"].dropna().unique().tolist())
+                else:
+                    subs_disp = sorted(df_sub["subelemento_desc"].dropna().unique().tolist())
+                sub_sel = fs5.multiselect(
+                    "Sub-elemento:", subs_disp, key="sub_sel"
+                )
+                # UG via Natureza: execucao(ug+natureza) -> sub_elementos(natureza_cod)
+                # extrai apenas os digitos iniciais do campo natureza da execucao
+                ugs_sub = (
+                    sorted(df_exec["ug"].dropna().unique().tolist())
+                    if not df_exec.empty else []
+                )
+                ug_sel_s = fs6.multiselect(
+                    "UG (via Natureza):", ugs_sub, key="ug_sub"
+                )
+
+                # Aplica filtros e soma todos os meses selecionados
+                df_sf = df_sub[df_sub["mes"].isin(ms_s)].copy()
+                # Filtro UG: UG -> naturezas na execucao -> natureza_cod no sub_elementos
+                if ug_sel_s and not df_exec.empty:
+                    nats_ug = df_exec[df_exec["ug"].isin(ug_sel_s)]["natureza"].dropna().unique()
+                    # extrai prefixo numerico (ex: "339030 - CONSUMO" -> "339030")
+                    nats_cod_ug = set(
+                        re.match(r"^(\d+)", str(n).strip()).group(1)
+                        for n in nats_ug
+                        if re.match(r"^(\d+)", str(n).strip())
+                    )
+                    df_sf = df_sf[
+                        df_sf["natureza_cod"].apply(
+                            lambda x: re.match(r"^(\d+)", str(x).strip()).group(1)
+                            if re.match(r"^(\d+)", str(x).strip()) else x
+                        ).isin(nats_cod_ug)
+                    ]
+                if paoe_s:
+                    df_sf = df_sf[df_sf["paoe"].isin(paoe_s)]
+                if nat_s:
+                    df_sf = df_sf[df_sf["natureza_cod"].isin(nat_s)]
+                if fonte_s and "fonte" in df_sf.columns:
+                    df_sf = df_sf[df_sf["fonte"].isin(fonte_s)]
+                if sub_sel:
+                    df_sf = df_sf[df_sf["subelemento_desc"].isin(sub_sel)]
+
+                if not df_sf.empty:
+                    has_fonte = "fonte" in df_sf.columns
+                    col_s = ["paoe", "natureza_cod", "natureza_desc"]
+                    if has_fonte:
+                        col_s += ["fonte"]
+                    col_s += ["subelemento_cod", "subelemento_desc"]
+
+                    df_sv = df_sf.groupby(col_s, as_index=False)[
+                        ["liquidado", "pago"]
+                    ].sum()
+
+                    ks1, ks2 = st.columns(2)
+                    ks1.metric(
+                        "Liquidado", "R$ {:,.2f}".format(df_sv["liquidado"].sum())
+                    )
+                    ks2.metric(
+                        "Pago", "R$ {:,.2f}".format(df_sv["pago"].sum())
+                    )
+                    st.dataframe(
+                        df_sv[col_s + ["liquidado", "pago"]]
+                        .style.format({
+                            "liquidado": "{:,.2f}",
+                            "pago": "{:,.2f}"
+                        }),
+                        width='stretch'
+                    )
+                else:
+                    st.info("Nenhum dado para os filtros selecionados.")
+
+
+# ---------------------------------------------------------------------------
+# ABA 3: COMPARATIVO
+# ---------------------------------------------------------------------------
 with tab3:
-    if not df_rec.empty or not df_desp.empty:
-        st.subheader("⚖️ Confronto Financeiro")
-        ms_c = st.multiselect("Meses:", sorted(list(set(df_rec['mes'].unique()) | set(df_desp['mes'].unique()))), default=sorted(list(set(df_rec['mes'].unique()) | set(df_desp['mes'].unique()))), format_func=lambda x: MESES_NOMES[x-1], key="msc")
-        tr = df_rec[df_rec['mes'].isin(ms_c)]['realizado'].sum()
-        te = df_desp[df_desp['mes'].isin(ms_c)]['empenhado'].sum()
-        tp = df_desp[df_desp['mes'].isin(ms_c)]['pago'].sum()
-        c1, c2 = st.columns(2); c1.info(f"**Superávit Financeiro:** R$ {tr - tp:,.2f}"); c2.warning(f"**Superávit Orçamentário:** R$ {tr - te:,.2f}")
-        fig_c = go.Figure(); fig_c.add_trace(go.Bar(name='Receita', x=['Total'], y=[tr], marker_color='green')); fig_c.add_trace(go.Bar(name='Empenhado', x=['Total'], y=[te], marker_color='orange'))
-        fig_c.update_layout(height=400, barmode='group'); st.plotly_chart(fig_c, use_container_width=True)
+    st.subheader("Confronto Geral - Receita x Despesa")
+    if df_rec.empty and df_exec.empty:
+        st.info("Importe dados para visualizar.")
+    else:
+        todos = sorted(set(
+            (df_rec["mes"].tolist() if not df_rec.empty else [])
+            + (df_exec["mes"].tolist() if not df_exec.empty else [])
+        ))
+        ms_c = st.multiselect(
+            "Meses:", todos, default=todos,
+            format_func=lambda x: MESES_NOMES[x - 1], key="ms_c"
+        )
+        tr = (
+            df_rec[df_rec["mes"].isin(ms_c)]["realizado"].sum()
+            if not df_rec.empty else 0
+        )
+        te = (
+            df_exec[df_exec["mes"].isin(ms_c)]["empenhado"].sum()
+            if not df_exec.empty else 0
+        )
+        tl = (
+            df_exec[df_exec["mes"].isin(ms_c)]["liquidado"].sum()
+            if not df_exec.empty else 0
+        )
+        tp = (
+            df_exec[df_exec["mes"].isin(ms_c)]["pago"].sum()
+            if not df_exec.empty else 0
+        )
 
-with tab4:
-    st.subheader("📄 Anexos LRF")
-    if not df_rec.empty and not df_desp.empty:
-        bim = st.selectbox("Bimestre:", list(BIMESTRES.keys()))
-        m_ac = list(range(1, max(BIMESTRES[bim]) + 1))
-        c1, c2, c3 = st.columns(3)
-        df_a1 = df_rec[df_rec['mes'].isin(m_ac)].groupby(['categoria', 'natureza']).agg({'orcado':'max', 'realizado':'sum'}).reset_index()
-        c1.write("**Anexo I**"); c1.download_button("📥 Baixar Anexo I", data=gerar_excel_lrf(df_a1), file_name="AnexoI.xlsx", key="lrf1")
-        df_a1a = df_desp[df_desp['mes'].isin(m_ac)].groupby(['natureza']).agg({'cred_autorizado':'max', 'empenhado':'sum', 'liquidado':'sum', 'pago':'sum'}).reset_index()
-        c2.write("**Anexo IA**"); c2.download_button("📥 Baixar Anexo IA", data=gerar_excel_lrf(df_a1a), file_name="AnexoIA.xlsx", key="lrf1a")
-        df_a2 = df_desp[df_desp['mes'].isin(m_ac)].groupby(['funcao', 'subfuncao']).agg({'cred_autorizado':'max', 'empenhado':'sum', 'liquidado':'sum'}).reset_index()
-        c3.write("**Anexo II**"); c3.download_button("📥 Baixar Anexo II", data=gerar_excel_lrf(df_a2), file_name="AnexoII.xlsx", key="lrf2")
+        kc1, kc2, kc3, kc4 = st.columns(4)
+        kc1.metric("Receita Arrecadada", "R$ {:,.2f}".format(tr))
+        kc2.metric("Desp. Empenhada",    "R$ {:,.2f}".format(te))
+        kc3.metric("Desp. Liquidada",    "R$ {:,.2f}".format(tl))
+        kc4.metric("Desp. Paga",         "R$ {:,.2f}".format(tp))
+
+        st.divider()
+        m1, m2 = st.columns(2)
+        m1.info(
+            "Superavit Financeiro (Receita - Pago): R$ {:,.2f}".format(tr - tp)
+        )
+        m2.warning(
+            "Superavit Orcamentario (Receita - Empenhado): R$ {:,.2f}".format(tr - te)
+        )
+
+        fig_c = go.Figure()
+        fig_c.add_trace(
+            go.Bar(name="Receita", x=["Confronto"], y=[tr], marker_color="green")
+        )
+        fig_c.add_trace(
+            go.Bar(name="Empenhado", x=["Confronto"], y=[te], marker_color="orange")
+        )
+        fig_c.add_trace(
+            go.Bar(name="Liquidado", x=["Confronto"], y=[tl], marker_color="#72A0C1")
+        )
+        fig_c.add_trace(
+            go.Bar(name="Pago", x=["Confronto"], y=[tp], marker_color="red")
+        )
+        fig_c.update_layout(
+            height=400, barmode="group", margin=dict(l=0, r=0, t=30, b=0)
+        )
+        st.plotly_chart(fig_c, width='stretch')
