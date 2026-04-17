@@ -142,6 +142,11 @@ def inicializar_banco():
         "subelemento_cod TEXT, subelemento_desc TEXT, fonte TEXT, "
         "liquidado REAL, pago REAL)"
     )
+    # Migração: renomeia categoria antiga se ainda existir no banco
+    conn.execute(
+        "UPDATE receitas SET categoria='Receita Corrente' "
+        "WHERE categoria='Repasses Correntes'"
+    )
     conn.commit()
     conn.close()
 
@@ -494,17 +499,6 @@ with st.sidebar:
         conn_r.commit()
         conn_r.close()
         st.success("Tabela '" + tabela_rest + "' restaurada!")
-        st.rerun()
-
-    st.divider()
-    if st.button("Corrigir categoria Repasses -> Receita Corrente"):
-        conn_fix = sqlite3.connect(DB_NAME)
-        n = conn_fix.execute(
-            "UPDATE receitas SET categoria='Receita Corrente' WHERE categoria='Repasses Correntes'"
-        ).rowcount
-        conn_fix.commit()
-        conn_fix.close()
-        st.success(str(n) + " registros corrigidos.")
         st.rerun()
 
     st.divider()
