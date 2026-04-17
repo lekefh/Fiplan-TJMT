@@ -8,7 +8,7 @@ import re
 DB_NAME = 'dados_gestao_integrada.db'
 st.set_page_config(page_title="FIPLAN - GESTAO INTEGRADA", layout="wide")
 st.markdown(
-    "<h2 style='text-align:center;margin-bottom:0'>UO 03601 - FUNAJURIS</h2>"
+    "<h2 style='text-align:center;margin-bottom:0'>UO 03101 - TJMT</h2>"
     "<p style='text-align:center;color:#888;margin-top:0'>"
     "Gestao Financeira Integrada - FIPLAN</p>",
     unsafe_allow_html=True
