@@ -438,10 +438,6 @@ def inicializar_banco():
     except Exception:
         pass
 
-    # Orcamento: importado da FIP 616 (dotacao / credito autorizado)
-    # Colunas 616: [0]PODER [1]UO [2]UG [3]FUNCAO [4]SUBFUNCAO [5]PROGRAMA
-    #              [6]PAOE  [7]NATUREZA [8]MODALIDADE [9]ELEMENTO [10]FONTE
-    #              [11]ORCADO INICIAL  [12]CREDITO AUTORIZADO
     conn.execute(
         "CREATE TABLE IF NOT EXISTS orcamento ("
         "mes INTEGER, ano INTEGER, uo TEXT, ug TEXT, funcao TEXT, subfuncao TEXT, "
@@ -449,10 +445,6 @@ def inicializar_banco():
         "orcado_inicial REAL, cred_autorizado REAL)"
     )
 
-    # Execucao: importado da FIP 613 (valores mensais diretos, nao acumulados)
-    # Colunas 613: [0]UO [1]UG [2]FUNCAO [3]SUBFUNCAO [4]PROGRAMA [5]PROJETO
-    #              [6]REGIONAL [7]NATUREZA [8]FONTE [9]IDUSO [10]TIPO_REC
-    #              [21]EMPENHADO [22]LIQUIDADO [24]VALOR PAGO
     conn.execute(
         "CREATE TABLE IF NOT EXISTS execucao ("
         "mes INTEGER, ano INTEGER, uo TEXT, ug TEXT, funcao TEXT, subfuncao TEXT, "
@@ -461,8 +453,6 @@ def inicializar_banco():
         "empenhado REAL, liquidado REAL, pago REAL)"
     )
 
-    # Recria sub_elementos se a coluna fonte nao estiver na posicao correta
-    # (problema de ALTER TABLE que adiciona ao final, causando mapeamento errado)
     cols_sub = [r[1] for r in conn.execute("PRAGMA table_info(sub_elementos)").fetchall()]
     schema_correto = (
         cols_sub == ["mes", "ano", "paoe", "natureza_cod", "natureza_desc",
@@ -476,7 +466,15 @@ def inicializar_banco():
         "subelemento_cod TEXT, subelemento_desc TEXT, fonte TEXT, "
         "liquidado REAL, pago REAL)"
     )
-    # Migração: renomeia categoria antiga se ainda existir no banco
+
+    # Tabela para repasses recebidos (ANEXO V)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS anexo_v ("
+        "mes INTEGER, ano INTEGER, data TEXT, "
+        "entidade_repassadora TEXT, valor REAL, "
+        "finalidade TEXT, fundamento_legal TEXT)"
+    )
+
     conn.execute(
         "UPDATE receitas SET categoria='Receita Corrente' "
         "WHERE categoria='Repasses Correntes'"
@@ -491,6 +489,7 @@ def limpar_todos_dados():
     conn.execute("DELETE FROM orcamento")
     conn.execute("DELETE FROM execucao")
     conn.execute("DELETE FROM sub_elementos")
+    conn.execute("DELETE FROM anexo_v")
     try:
         conn.execute("DELETE FROM despesas")
     except Exception:
@@ -512,7 +511,8 @@ with st.sidebar:
             "Receita (FIP 729)",
             "Orcamento (FIP 616)",
             "Execucao (FIP 613)",
-            "Sub-elemento (FIP 701)"
+            "Sub-elemento (FIP 701)",
+            "Repasses Recebidos (ANEXO V)"
         ]
     )
     arquivo = st.file_uploader("Arquivo Excel", type=["xlsx"])
@@ -524,7 +524,6 @@ with st.sidebar:
 
             # ----------------------------------------------------------------
             # RECEITA (FIP 729)
-            # skiprows=7: [0]cod [1]natureza [3]orcado [5]previsao [6]realizado
             # ----------------------------------------------------------------
             if tipo_dado == "Receita (FIP 729)":
                 df = pd.read_excel(arquivo, skiprows=7, header=0)
@@ -562,11 +561,7 @@ with st.sidebar:
                 )
 
             # ----------------------------------------------------------------
-            # ORCAMENTO (FIP 616) - apenas dotacao e credito autorizado
-            # skiprows=6 -> header na linha 6 do Excel (0-indexado)
-            # [0]PODER [1]UO [2]UG [3]FUNCAO [4]SUBFUNCAO [5]PROGRAMA
-            # [6]PAOE  [7]NATUREZA DESPESA [8]MODALIDADE [9]ELEMENTO
-            # [10]FONTE [11]ORCADO INICIAL [12]CREDITO AUTORIZADO
+            # ORCAMENTO (FIP 616)
             # ----------------------------------------------------------------
             elif tipo_dado == "Orcamento (FIP 616)":
                 df = pd.read_excel(arquivo, skiprows=6, header=0)
@@ -590,7 +585,6 @@ with st.sidebar:
                         fonte     = norm(gc616(row, 10))
                         orc_ini   = limpar_f(gc616(row, 11, 0))
                         cred_aut  = limpar_f(gc616(row, 12, 0))
-                        # Guarda somente linhas com algum valor orcamentario
                         if orc_ini == 0 and cred_aut == 0:
                             continue
                         linhas.append((
@@ -616,12 +610,7 @@ with st.sidebar:
                 )
 
             # ----------------------------------------------------------------
-            # EXECUCAO (FIP 613) - valores mensais diretos (nao acumulados)
-            # skiprows=10 -> header real na linha 10 do Excel (0-indexado)
-            # [0]UO [1]UG [2]FUNCAO [3]SUBFUNCAO [4]PROGRAMA [5]PROJETO
-            # [6]REGIONAL [7]NATUREZA [8]FONTE [9]IDUSO [10]TIPO_REC
-            # [11]DOTACAO INICIAL ... [16]CRED AUTORIZADO ...
-            # [21]EMPENHADO [22]LIQUIDADO [23]A LIQUIDAR [24]VALOR PAGO
+            # EXECUCAO (FIP 613)
             # ----------------------------------------------------------------
             elif tipo_dado == "Execucao (FIP 613)":
                 df = pd.read_excel(arquivo, skiprows=10, header=0)
@@ -636,7 +625,6 @@ with st.sidebar:
                         uo = norm(gc613(row, 0))
                         if not uo or uo in ("nan", "", "_"):
                             continue
-                        # Iduso=NaN indica linhas de TOTAL/SUBTOTAL -> pula
                         if pd.isna(gc613(row, 9, float("nan"))):
                             continue
                         ug        = norm(gc613(row, 1))
@@ -652,7 +640,6 @@ with st.sidebar:
                         emp = limpar_f(gc613(row, 21, 0))
                         liq = limpar_f(gc613(row, 22, 0))
                         pag = limpar_f(gc613(row, 24, 0))
-                        # Guarda somente linhas com execucao real
                         if emp == 0 and liq == 0 and pag == 0:
                             continue
                         linhas.append((
@@ -686,9 +673,6 @@ with st.sidebar:
 
             # ----------------------------------------------------------------
             # SUB-ELEMENTO (FIP 701)
-            # Estrutura hierarquica: PROJ/ATIV -> NATUREZA -> subelementos
-            # col[0]=descricao  col[1]=LIQUIDADO  col[2]=PAGO
-            # A 701 e acumulada, entao subtrai meses anteriores
             # ----------------------------------------------------------------
             elif tipo_dado == "Sub-elemento (FIP 701)":
                 df701 = pd.read_excel(arquivo, header=None)
@@ -728,7 +712,6 @@ with st.sidebar:
                         parts = text.split(" ", 1)
                         sub_cod  = parts[0].strip()
                         sub_desc = parts[1].strip() if len(parts) > 1 else ""
-                        # Fonte: ultimo segmento do codigo (ex: 3.3.90.47.47.016.17600000)
                         fonte_sub = sub_cod.rsplit(".", 1)[-1] if "." in sub_cod else ""
                         liq_cum  = (
                             limpar_f(row.iloc[1]) if pd.notna(row.iloc[1]) else 0.0
@@ -750,8 +733,6 @@ with st.sidebar:
                 if not linhas:
                     st.warning("Nenhum sub-elemento valido encontrado.")
                 else:
-                    # A 701 ja traz valores mensais diretos (como a 613).
-                    # Armazenamos os valores do mes sem qualquer subtracao.
                     chaves_701 = ["paoe", "nat_cod", "sub_cod"]
                     df_mes = (
                         pd.DataFrame(linhas)
@@ -793,6 +774,46 @@ with st.sidebar:
                         + "Liq R$ {:,.0f} | Pago R$ {:,.0f}".format(liq_t, pag_t)
                     )
 
+            # ----------------------------------------------------------------
+            # REPASSES RECEBIDOS (ANEXO V)
+            # Estrutura: header na linha 9 (0-indexed), dados a partir da linha 10
+            # Colunas: Data | Entidade Repassadora | Valor | Finalidade | Fundamento Legal
+            # ----------------------------------------------------------------
+            elif tipo_dado == "Repasses Recebidos (ANEXO V)":
+                df_av = pd.read_excel(arquivo, skiprows=9, header=0)
+                dados_av = []
+                for _, row in df_av.iterrows():
+                    try:
+                        data_val = str(row.iloc[0]).strip()
+                        # Para quando chega na linha de total ou vazia
+                        if not data_val or data_val in ("nan", "") or "Total" in data_val:
+                            continue
+                        entidade = str(row.iloc[1]).strip().replace("\xa0", " ")
+                        if not entidade or entidade in ("nan", "Entidade Repassadora"):
+                            continue
+                        valor = limpar_f(row.iloc[2])
+                        finalidade = str(row.iloc[3]).strip().replace("\xa0", " ") if pd.notna(row.iloc[3]) else ""
+                        fundamento = str(row.iloc[4]).strip() if pd.notna(row.iloc[4]) else ""
+                        dados_av.append((
+                            m_final, 2026, data_val, entidade, valor, finalidade, fundamento
+                        ))
+                    except Exception:
+                        continue
+
+                conn.execute(
+                    "DELETE FROM anexo_v WHERE ano=2026 AND mes=?", (m_final,)
+                )
+                conn.executemany(
+                    "INSERT INTO anexo_v VALUES (?,?,?,?,?,?,?)", dados_av
+                )
+                conn.commit()
+                total_av = sum(r[4] for r in dados_av)
+                st.success(
+                    "ANEXO V " + MESES_NOMES[m_final - 1] + "/2026: "
+                    + str(len(dados_av)) + " registros | "
+                    + "Total R$ {:,.2f}".format(total_av)
+                )
+
             conn.close()
 
         except Exception as e:
@@ -804,10 +825,11 @@ with st.sidebar:
     st.subheader("Backup Completo")
     conn_b = sqlite3.connect(DB_NAME)
     tbls = {
-        "receitas":     pd.read_sql("SELECT * FROM receitas",      conn_b),
-        "orcamento":    pd.read_sql("SELECT * FROM orcamento",     conn_b),
-        "execucao":     pd.read_sql("SELECT * FROM execucao",      conn_b),
-        "sub_elementos":pd.read_sql("SELECT * FROM sub_elementos", conn_b),
+        "receitas":      pd.read_sql("SELECT * FROM receitas",      conn_b),
+        "orcamento":     pd.read_sql("SELECT * FROM orcamento",     conn_b),
+        "execucao":      pd.read_sql("SELECT * FROM execucao",      conn_b),
+        "sub_elementos": pd.read_sql("SELECT * FROM sub_elementos", conn_b),
+        "anexo_v":       pd.read_sql("SELECT * FROM anexo_v",       conn_b),
     }
     conn_b.close()
     for nome_tab, df_tab in tbls.items():
@@ -822,7 +844,7 @@ with st.sidebar:
     st.caption("Restaurar tabela (CSV do backup):")
     tabela_rest = st.selectbox(
         "Tabela a restaurar:",
-        ["receitas", "orcamento", "execucao", "sub_elementos"],
+        ["receitas", "orcamento", "execucao", "sub_elementos", "anexo_v"],
         key="tabela_rest"
     )
     file_restore = st.file_uploader("Arquivo CSV", type=["csv"], key="file_rest")
@@ -850,10 +872,11 @@ with st.sidebar:
 # CARGA PRINCIPAL
 # ---------------------------------------------------------------------------
 conn_main = sqlite3.connect(DB_NAME)
-df_rec  = pd.read_sql("SELECT * FROM receitas",      conn_main)
-df_orc  = pd.read_sql("SELECT * FROM orcamento",     conn_main)
-df_exec = pd.read_sql("SELECT * FROM execucao",      conn_main)
-df_sub  = pd.read_sql("SELECT * FROM sub_elementos", conn_main)
+df_rec    = pd.read_sql("SELECT * FROM receitas",      conn_main)
+df_orc    = pd.read_sql("SELECT * FROM orcamento",     conn_main)
+df_exec   = pd.read_sql("SELECT * FROM execucao",      conn_main)
+df_sub    = pd.read_sql("SELECT * FROM sub_elementos", conn_main)
+df_anexov = pd.read_sql("SELECT * FROM anexo_v",       conn_main)
 conn_main.close()
 
 tab1, tab2, tab3, tab4 = st.tabs(["Receitas", "Despesas", "Comparativo", "Relatorios LRF"])
@@ -941,11 +964,84 @@ with tab1:
                 width='stretch'
             )
 
+    # -----------------------------------------------------------------------
+    # REPASSES RECEBIDOS (ANEXO V)
+    # -----------------------------------------------------------------------
+    st.divider()
+    st.subheader("Repasses Recebidos - ANEXO V")
+
+    if df_anexov.empty:
+        st.info("Importe dados de Repasses Recebidos (ANEXO V) para visualizar.")
+    else:
+        av1, av2 = st.columns(2)
+        meses_av = sorted(df_anexov["mes"].unique())
+        ms_av = av1.multiselect(
+            "Meses:", meses_av,
+            default=meses_av,
+            format_func=lambda x: MESES_NOMES[x - 1],
+            key="ms_av"
+        )
+        entidades_disp = sorted(df_anexov["entidade_repassadora"].dropna().unique())
+        entidade_sel = av2.multiselect(
+            "Entidade Repassadora:", entidades_disp,
+            default=entidades_disp,
+            key="entidade_av"
+        )
+
+        df_avf = df_anexov[
+            df_anexov["mes"].isin(ms_av) &
+            df_anexov["entidade_repassadora"].isin(entidade_sel)
+        ].copy()
+
+        if not df_avf.empty:
+            total_repasses = df_avf["valor"].sum()
+            ka1, ka2 = st.columns(2)
+            ka1.metric("Total Repassado", "R$ {:,.2f}".format(total_repasses))
+            ka2.metric("Quantidade de Repasses", str(len(df_avf)))
+
+            # Grafico por entidade repassadora
+            df_por_entidade = (
+                df_avf.groupby("entidade_repassadora")["valor"]
+                .sum()
+                .reset_index()
+                .sort_values("valor", ascending=False)
+            )
+            fig_av = go.Figure(go.Bar(
+                x=df_por_entidade["entidade_repassadora"],
+                y=df_por_entidade["valor"],
+                marker_color="#1565C0",
+                text=df_por_entidade["valor"].apply(
+                    lambda v: "R$ {:,.0f}".format(v)
+                ),
+                textposition="outside"
+            ))
+            fig_av.update_layout(
+                height=350,
+                margin=dict(l=0, r=0, t=30, b=0),
+                xaxis_tickangle=-30,
+                yaxis_title="Valor (R$)"
+            )
+            st.plotly_chart(fig_av, width='stretch')
+
+            st.dataframe(
+                df_avf[["mes", "data", "entidade_repassadora", "valor", "finalidade", "fundamento_legal"]]
+                .rename(columns={
+                    "mes": "Mes",
+                    "data": "Data",
+                    "entidade_repassadora": "Entidade Repassadora",
+                    "valor": "Valor (R$)",
+                    "finalidade": "Finalidade",
+                    "fundamento_legal": "Fundamento Legal"
+                })
+                .style.format({"Valor (R$)": "{:,.2f}"}),
+                width='stretch'
+            )
+        else:
+            st.info("Nenhum dado para os filtros selecionados.")
+
 
 # ---------------------------------------------------------------------------
 # ABA 2: DESPESAS
-# Cred. Autorizado: vem da tabela orcamento (FIP 616)
-# Empenhado/Liquidado/Pago: vem da tabela execucao (FIP 613, mensal direto)
 # ---------------------------------------------------------------------------
 with tab2:
     has_orc  = not df_orc.empty
@@ -992,7 +1088,6 @@ with tab2:
         nats_disp = sorted(df_exec["natureza"].dropna().unique().tolist()) if has_exec else []
         bd = st.multiselect("Natureza:", nats_disp, key="busca_d")
 
-        # Aplica filtros sobre execucao
         df_ef = df_exec[df_exec["mes"].isin(ms_d)].copy() if has_exec else pd.DataFrame()
         if ug_sel and not df_ef.empty:
             df_ef = df_ef[df_ef["ug"].isin(ug_sel)]
@@ -1007,11 +1102,9 @@ with tab2:
         if bd and not df_ef.empty:
             df_ef = df_ef[df_ef["natureza"].isin(bd)]
 
-        # KPIs
         m_max_orc = int(df_orc["mes"].max()) if has_orc else 0
         m_max_sel = max(ms_d) if ms_d else m_max_orc
 
-        # Cred. Autorizado: sempre do ultimo mes disponivel no orcamento
         cred_total = (
             df_orc[df_orc["mes"] == m_max_orc]["cred_autorizado"].sum()
             if has_orc else 0
@@ -1031,7 +1124,6 @@ with tab2:
         k4.metric("Pago",       "R$ {:,.2f}".format(pag_total))
 
         if not df_ef.empty:
-            # Grafico mensal de execucao
             df_g = (
                 df_ef.groupby("mes")[["empenhado", "liquidado", "pago"]]
                 .sum().reset_index()
@@ -1058,7 +1150,6 @@ with tab2:
             )
             st.plotly_chart(fig, width='stretch')
 
-            # Tabela agrupada
             ug_filtrada = set(ug_sel) != set(ugs_disp)
             col_chave = (["ug"] if ug_filtrada else []) + [
                 "funcao", "subfuncao", "programa", "projeto", "fonte", "natureza"
@@ -1077,7 +1168,6 @@ with tab2:
                 width='stretch'
             )
 
-        # Sub-elementos (FIP 701) — valores mensais diretos, soma dos meses selecionados
         if not df_sub.empty:
             st.divider()
             with st.expander("Sub-elementos por PAOE (FIP 701)"):
@@ -1104,7 +1194,6 @@ with tab2:
                 fonte_s = fs4.multiselect(
                     "Fonte:", fontes_sub, key="fonte_s"
                 )
-                # Sub-elemento: busca por codigo ou descricao, depois multiselect
                 sub_busca = fs5.text_input(
                     "Buscar sub-elemento (cod. ou desc.):",
                     key="sub_busca",
@@ -1121,8 +1210,6 @@ with tab2:
                 sub_sel = fs5.multiselect(
                     "Sub-elemento:", subs_disp, key="sub_sel"
                 )
-                # UG via Natureza: execucao(ug+natureza) -> sub_elementos(natureza_cod)
-                # extrai apenas os digitos iniciais do campo natureza da execucao
                 ugs_sub = (
                     sorted(df_exec["ug"].dropna().unique().tolist())
                     if not df_exec.empty else []
@@ -1131,12 +1218,9 @@ with tab2:
                     "UG (via Natureza):", ugs_sub, key="ug_sub"
                 )
 
-                # Aplica filtros e soma todos os meses selecionados
                 df_sf = df_sub[df_sub["mes"].isin(ms_s)].copy()
-                # Filtro UG: UG -> naturezas na execucao -> natureza_cod no sub_elementos
                 if ug_sel_s and not df_exec.empty:
                     nats_ug = df_exec[df_exec["ug"].isin(ug_sel_s)]["natureza"].dropna().unique()
-                    # extrai prefixo numerico (ex: "339030 - CONSUMO" -> "339030")
                     nats_cod_ug = set(
                         re.match(r"^(\d+)", str(n).strip()).group(1)
                         for n in nats_ug
