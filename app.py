@@ -4,6 +4,7 @@ import sqlite3
 import plotly.graph_objects as go
 import unicodedata
 import re
+import io
 
 DB_NAME = 'dados_gestao_integrada.db'
 st.set_page_config(page_title="FIPLAN - GESTAO INTEGRADA", layout="wide")
@@ -27,6 +28,15 @@ CATEGORIAS_REC = [
     "Receita Tributaria", "Receita Patrimonial", "Receita de Servicos",
     "Receita Corrente", "Demais Receitas"
 ]
+
+BIMESTRES = {
+    "1 Bimestre (Jan-Fev)": [1, 2],
+    "2 Bimestre (Mar-Abr)": [3, 4],
+    "3 Bimestre (Mai-Jun)": [5, 6],
+    "4 Bimestre (Jul-Ago)": [7, 8],
+    "5 Bimestre (Set-Out)": [9, 10],
+    "6 Bimestre (Nov-Dez)": [11, 12]
+}
 
 st.markdown(
     "<style>[data-testid='stMetricValue']"
@@ -83,6 +93,330 @@ def norm(v):
     except Exception:
         pass
     return s
+
+
+# ---------------------------------------------------------------------------
+# AUXILIARES LRF
+# ---------------------------------------------------------------------------
+def safe_div(n, d):
+    return (n / d) if d not in [0, None] else 0.0
+
+
+def periodo_bimestre_extenso(meses_bim):
+    meses_bim = sorted(meses_bim)
+    nomes = {
+        1: "JANEIRO", 2: "FEVEREIRO", 3: "MARCO", 4: "ABRIL",
+        5: "MAIO", 6: "JUNHO", 7: "JULHO", 8: "AGOSTO",
+        9: "SETEMBRO", 10: "OUTUBRO", 11: "NOVEMBRO", 12: "DEZEMBRO"
+    }
+    if len(meses_bim) == 1:
+        return nomes.get(meses_bim[0], "")
+    if len(meses_bim) == 2:
+        return "{} E {}".format(nomes.get(meses_bim[0], ""), nomes.get(meses_bim[1], ""))
+    return " A ".join([nomes.get(m, str(m)) for m in meses_bim])
+
+
+def natureza_para_str(v):
+    return re.sub(r"\D", "", str(v)) if pd.notna(v) else ""
+
+
+def modalidade_da_natureza(natureza):
+    s = natureza_para_str(natureza)
+    return s[2:4] if len(s) >= 4 else ""
+
+
+def grupo_natureza(natureza):
+    s = natureza_para_str(natureza)
+    return s[0] if s else ""
+
+
+def criar_formatos_excel(workbook):
+    base = {"font_name": "Arial", "font_size": 8}
+    fmt_header = workbook.add_format({**base, "bold": True, "align": "center", "valign": "vcenter", "border": 1, "bg_color": "#BFBFBF", "text_wrap": True})
+    fmt_group = workbook.add_format({**base, "bold": True, "border": 1, "bg_color": "#D9D9D9"})
+    fmt_subgroup = workbook.add_format({**base, "bold": True, "border": 1, "bg_color": "#EDEDED"})
+    fmt_item = workbook.add_format({**base, "border": 1, "indent": 1})
+    fmt_subitem = workbook.add_format({**base, "border": 1, "indent": 2})
+    fmt_total_text = workbook.add_format({**base, "bold": True, "border": 1, "bg_color": "#EDEDED"})
+    fmt_money = workbook.add_format({**base, "border": 1, "num_format": "#,##0.00"})
+    fmt_money_bold = workbook.add_format({**base, "bold": True, "border": 1, "bg_color": "#EDEDED", "num_format": "#,##0.00"})
+    fmt_money_total = workbook.add_format({**base, "bold": True, "border": 1, "bg_color": "#EDEDED", "num_format": "#,##0.00"})
+    fmt_pct = workbook.add_format({**base, "border": 1, "num_format": "0.00%"})
+    fmt_pct_bold = workbook.add_format({**base, "bold": True, "border": 1, "bg_color": "#EDEDED", "num_format": "0.00%"})
+    fmt_pct_total = workbook.add_format({**base, "bold": True, "border": 1, "bg_color": "#EDEDED", "num_format": "0.00%"})
+    return {
+        "fmt_header": fmt_header, "fmt_group": fmt_group, "fmt_subgroup": fmt_subgroup,
+        "fmt_item": fmt_item, "fmt_subitem": fmt_subitem, "fmt_total_text": fmt_total_text,
+        "fmt_money": fmt_money, "fmt_money_bold": fmt_money_bold, "fmt_money_total": fmt_money_total,
+        "fmt_pct": fmt_pct, "fmt_pct_bold": fmt_pct_bold, "fmt_pct_total": fmt_pct_total,
+    }
+
+
+def preparar_base_receitas_lrf(df_rec, meses_bim, meses_ate_agora):
+    if df_rec.empty:
+        return pd.DataFrame(columns=["categoria", "natureza", "previsao_inicial", "previsao_atualizada", "no_bimestre", "ate_bimestre", "saldo", "perc_bim", "perc_ate"])
+    df_base = df_rec[~df_rec["codigo_full"].astype(str).str.startswith("9")].copy()
+    chaves = ["categoria", "natureza"]
+    df_orcado = df_base[df_base["mes"].isin(meses_ate_agora)].groupby(chaves, as_index=False).agg({"orcado": "max"}).rename(columns={"orcado": "previsao_atualizada"})
+    df_orcado["previsao_inicial"] = df_orcado["previsao_atualizada"]
+    df_bim = df_base[df_base["mes"].isin(meses_bim)].groupby(chaves, as_index=False)["realizado"].sum().rename(columns={"realizado": "no_bimestre"})
+    df_ate = df_base[df_base["mes"].isin(meses_ate_agora)].groupby(chaves, as_index=False)["realizado"].sum().rename(columns={"realizado": "ate_bimestre"})
+    base = df_orcado.merge(df_bim, on=chaves, how="left").merge(df_ate, on=chaves, how="left").fillna(0)
+    base["saldo"] = base["previsao_atualizada"] - base["ate_bimestre"]
+    base["perc_bim"] = base.apply(lambda r: safe_div(r["no_bimestre"], r["previsao_atualizada"]), axis=1)
+    base["perc_ate"] = base.apply(lambda r: safe_div(r["ate_bimestre"], r["previsao_atualizada"]), axis=1)
+    return base
+
+
+def preparar_deducoes_receitas_lrf(df_rec, meses_bim, meses_ate_agora):
+    zero = {"previsao_inicial": 0.0, "previsao_atualizada": 0.0, "no_bimestre": 0.0, "ate_bimestre": 0.0, "saldo": 0.0, "perc_bim": 0.0, "perc_ate": 0.0}
+    if df_rec.empty:
+        return zero
+    df_ded = df_rec[df_rec["codigo_full"].astype(str).str.startswith("9")].copy()
+    if df_ded.empty:
+        return zero
+    prev_atu = float(df_ded[df_ded["mes"].isin(meses_ate_agora)].groupby("codigo_full")["orcado"].max().sum())
+    no_bim = float(df_ded[df_ded["mes"].isin(meses_bim)]["realizado"].sum())
+    ate_bim = float(df_ded[df_ded["mes"].isin(meses_ate_agora)]["realizado"].sum())
+    return {"previsao_inicial": prev_atu, "previsao_atualizada": prev_atu, "no_bimestre": no_bim, "ate_bimestre": ate_bim, "saldo": prev_atu - ate_bim, "perc_bim": safe_div(no_bim, prev_atu), "perc_ate": safe_div(ate_bim, prev_atu)}
+
+
+def preparar_base_despesas_lrf(df_orc, df_exec, meses_bim, meses_ate_agora):
+    if df_orc.empty and df_exec.empty:
+        return pd.DataFrame(columns=["natureza", "orcado_inicial", "cred_autorizado", "emp_no_bim", "emp_ate", "liq_no_bim", "liq_ate", "pago_ate", "modalidade", "grupo"])
+    meses_orc = sorted(set(df_orc["mes"].tolist()).intersection(set(meses_ate_agora))) if not df_orc.empty else []
+    m_ref = max(meses_orc) if meses_orc else max(meses_ate_agora)
+    if not df_orc.empty and m_ref in df_orc["mes"].values:
+        df_last = df_orc[df_orc["mes"] == m_ref].groupby(["natureza"], as_index=False).agg({"orcado_inicial": "sum", "cred_autorizado": "sum"})
+    else:
+        df_last = pd.DataFrame(columns=["natureza", "orcado_inicial", "cred_autorizado"])
+    if not df_exec.empty:
+        df_bim = df_exec[df_exec["mes"].isin(meses_bim)].groupby(["natureza"], as_index=False).agg({"empenhado": "sum", "liquidado": "sum"}).rename(columns={"empenhado": "emp_no_bim", "liquidado": "liq_no_bim"})
+        df_ate = df_exec[df_exec["mes"].isin(meses_ate_agora)].groupby(["natureza"], as_index=False).agg({"empenhado": "sum", "liquidado": "sum", "pago": "sum"}).rename(columns={"empenhado": "emp_ate", "liquidado": "liq_ate", "pago": "pago_ate"})
+    else:
+        df_bim = pd.DataFrame(columns=["natureza", "emp_no_bim", "liq_no_bim"])
+        df_ate = pd.DataFrame(columns=["natureza", "emp_ate", "liq_ate", "pago_ate"])
+    base = df_last.merge(df_bim, on="natureza", how="outer").merge(df_ate, on="natureza", how="outer").fillna(0)
+    base["modalidade"] = base["natureza"].apply(modalidade_da_natureza)
+    base["grupo"] = base["natureza"].apply(grupo_natureza)
+    return base
+
+
+def preparar_base_funcional_lrf(df_orc, df_exec, meses_bim, meses_ate_agora):
+    if df_orc.empty and df_exec.empty:
+        return pd.DataFrame(columns=["funcao", "subfuncao", "orcado_inicial", "cred_autorizado", "emp_no_bim", "emp_ate", "liq_no_bim", "liq_ate"])
+    meses_orc = sorted(set(df_orc["mes"].tolist()).intersection(set(meses_ate_agora))) if not df_orc.empty else []
+    m_ref = max(meses_orc) if meses_orc else max(meses_ate_agora)
+    if not df_orc.empty and m_ref in df_orc["mes"].values:
+        df_last = df_orc[df_orc["mes"] == m_ref].groupby(["funcao", "subfuncao"], as_index=False).agg({"orcado_inicial": "sum", "cred_autorizado": "sum"})
+    else:
+        df_last = pd.DataFrame(columns=["funcao", "subfuncao", "orcado_inicial", "cred_autorizado"])
+    if not df_exec.empty:
+        df_bim = df_exec[df_exec["mes"].isin(meses_bim)].groupby(["funcao", "subfuncao"], as_index=False).agg({"empenhado": "sum", "liquidado": "sum"}).rename(columns={"empenhado": "emp_no_bim", "liquidado": "liq_no_bim"})
+        df_ate = df_exec[df_exec["mes"].isin(meses_ate_agora)].groupby(["funcao", "subfuncao"], as_index=False).agg({"empenhado": "sum", "liquidado": "sum"}).rename(columns={"empenhado": "emp_ate", "liquidado": "liq_ate"})
+    else:
+        df_bim = pd.DataFrame(columns=["funcao", "subfuncao", "emp_no_bim", "liq_no_bim"])
+        df_ate = pd.DataFrame(columns=["funcao", "subfuncao", "emp_ate", "liq_ate"])
+    return df_last.merge(df_bim, on=["funcao", "subfuncao"], how="outer").merge(df_ate, on=["funcao", "subfuncao"], how="outer").fillna(0)
+
+
+def gerar_excel_anexo1(df_rec, meses_bim, meses_ate_agora):
+    base = preparar_base_receitas_lrf(df_rec, meses_bim, meses_ate_agora)
+    deducoes = preparar_deducoes_receitas_lrf(df_rec, meses_bim, meses_ate_agora)
+    periodo = periodo_bimestre_extenso(meses_bim)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        workbook = writer.book
+        worksheet = workbook.add_worksheet("Anexo_I")
+        writer.sheets["Anexo_I"] = worksheet
+        f = criar_formatos_excel(workbook)
+        worksheet.set_column("A:A", 42); worksheet.set_column("B:C", 18); worksheet.set_column("D:H", 18)
+        worksheet.merge_range(0, 0, 1, 0, "RECEITAS", f["fmt_header"])
+        worksheet.merge_range(0, 1, 1, 1, "PREVISAO INICIAL", f["fmt_header"])
+        worksheet.merge_range(0, 2, 1, 2, "PREVISAO ATUALIZADA (A)", f["fmt_header"])
+        worksheet.merge_range(0, 3, 0, 7, "RECEITAS REALIZADAS", f["fmt_header"])
+        worksheet.write(1, 3, "NO BIMESTRE\n" + periodo, f["fmt_header"])
+        worksheet.write(1, 4, "%\n(B/A)", f["fmt_header"])
+        worksheet.write(1, 5, "ATE O BIMESTRE\n" + periodo, f["fmt_header"])
+        worksheet.write(1, 6, "%\n(C/A)", f["fmt_header"])
+        worksheet.write(1, 7, "SALDO A\nREALIZAR\n(A-C)", f["fmt_header"])
+        ordem_categorias = ["Receita Tributaria", "Receita Patrimonial", "Receita de Servicos", "Receita Corrente", "Demais Receitas"]
+        grupos = {"RECEITAS CORRENTES": ["Receita Tributaria", "Receita Patrimonial", "Receita de Servicos", "Receita Corrente"], "DEMAIS RECEITAS CORRENTES": ["Demais Receitas"]}
+        row = 2
+        def write_row(desc, vals, fd, fn, fp):
+            nonlocal row
+            worksheet.write(row, 0, desc, fd)
+            worksheet.write_number(row, 1, vals.get("previsao_inicial", 0), fn)
+            worksheet.write_number(row, 2, vals.get("previsao_atualizada", 0), fn)
+            worksheet.write_number(row, 3, vals.get("no_bimestre", 0), fn)
+            worksheet.write_number(row, 4, vals.get("perc_bim", 0), fp)
+            worksheet.write_number(row, 5, vals.get("ate_bimestre", 0), fn)
+            worksheet.write_number(row, 6, vals.get("perc_ate", 0), fp)
+            worksheet.write_number(row, 7, vals.get("saldo", 0), fn)
+            row += 1
+        total_geral = {"previsao_inicial": 0, "previsao_atualizada": 0, "no_bimestre": 0, "ate_bimestre": 0, "saldo": 0}
+        for nome_grupo, cats in grupos.items():
+            df_g = base[base["categoria"].isin(cats)].copy()
+            if df_g.empty:
+                continue
+            soma_g = {"previsao_inicial": float(df_g["previsao_inicial"].sum()), "previsao_atualizada": float(df_g["previsao_atualizada"].sum()), "no_bimestre": float(df_g["no_bimestre"].sum()), "ate_bimestre": float(df_g["ate_bimestre"].sum()), "saldo": float(df_g["saldo"].sum())}
+            soma_g["perc_bim"] = safe_div(soma_g["no_bimestre"], soma_g["previsao_atualizada"])
+            soma_g["perc_ate"] = safe_div(soma_g["ate_bimestre"], soma_g["previsao_atualizada"])
+            write_row(nome_grupo, soma_g, f["fmt_group"], f["fmt_money"], f["fmt_pct"])
+            for cat in [c for c in ordem_categorias if c in cats]:
+                df_c = df_g[df_g["categoria"] == cat].copy()
+                if df_c.empty:
+                    continue
+                soma_c = {"previsao_inicial": float(df_c["previsao_inicial"].sum()), "previsao_atualizada": float(df_c["previsao_atualizada"].sum()), "no_bimestre": float(df_c["no_bimestre"].sum()), "ate_bimestre": float(df_c["ate_bimestre"].sum()), "saldo": float(df_c["saldo"].sum())}
+                soma_c["perc_bim"] = safe_div(soma_c["no_bimestre"], soma_c["previsao_atualizada"])
+                soma_c["perc_ate"] = safe_div(soma_c["ate_bimestre"], soma_c["previsao_atualizada"])
+                write_row(cat.upper(), soma_c, f["fmt_subgroup"], f["fmt_money"], f["fmt_pct"])
+                for _, r in df_c.sort_values("natureza").iterrows():
+                    write_row(str(r["natureza"]), {"previsao_inicial": float(r["previsao_inicial"]), "previsao_atualizada": float(r["previsao_atualizada"]), "no_bimestre": float(r["no_bimestre"]), "ate_bimestre": float(r["ate_bimestre"]), "saldo": float(r["saldo"]), "perc_bim": float(r["perc_bim"]), "perc_ate": float(r["perc_ate"])}, f["fmt_item"], f["fmt_money"], f["fmt_pct"])
+            for k in ["previsao_inicial", "previsao_atualizada", "no_bimestre", "ate_bimestre", "saldo"]:
+                total_geral[k] += soma_g[k]
+        total_geral["perc_bim"] = safe_div(total_geral["no_bimestre"], total_geral["previsao_atualizada"])
+        total_geral["perc_ate"] = safe_div(total_geral["ate_bimestre"], total_geral["previsao_atualizada"])
+        total_final = {k: total_geral.get(k, 0) + deducoes.get(k, 0) for k in ["previsao_inicial", "previsao_atualizada", "no_bimestre", "ate_bimestre", "saldo"]}
+        total_final["perc_bim"] = safe_div(total_final["no_bimestre"], total_final["previsao_atualizada"])
+        total_final["perc_ate"] = safe_div(total_final["ate_bimestre"], total_final["previsao_atualizada"])
+        zero = {"previsao_inicial": 0, "previsao_atualizada": 0, "no_bimestre": 0, "ate_bimestre": 0, "saldo": 0, "perc_bim": 0, "perc_ate": 0}
+        for desc, vals in [("SUBTOTAL DA RECEITA (I)", total_geral), ("DEFICIT (II)", zero), ("TOTAL (III) = I + II", total_geral), ("DEDUCOES DA RECEITA (CODIGOS INICIADOS POR 9)", deducoes), ("SALDO DE EXERCICIOS ANTERIORES", zero), ("SUPERAVIT FINANCEIRO", zero), ("TOTAL DA RECEITA (IV)", total_final)]:
+            write_row(desc, vals, f["fmt_total_text"], f["fmt_money_bold"], f["fmt_pct_bold"])
+        worksheet.freeze_panes(2, 1)
+    return output.getvalue()
+
+
+def gerar_excel_anexo1a(df_orc, df_exec, df_rec, meses_bim, meses_ate_agora):
+    base = preparar_base_despesas_lrf(df_orc, df_exec, meses_bim, meses_ate_agora)
+    periodo = periodo_bimestre_extenso(meses_bim)
+    receita_bim = float(df_rec[df_rec["mes"].isin(meses_bim)]["realizado"].sum()) if not df_rec.empty else 0.0
+    receita_ate = float(df_rec[df_rec["mes"].isin(meses_ate_agora)]["realizado"].sum()) if not df_rec.empty else 0.0
+
+    def somar(mask):
+        df = base[mask].copy() if not base.empty and len(mask) > 0 else pd.DataFrame()
+        v = {c: float(df[c].sum()) if not df.empty and c in df.columns else 0.0 for c in ["orcado_inicial", "cred_autorizado", "emp_no_bim", "emp_ate", "liq_no_bim", "liq_ate", "pago_ate"]}
+        v["saldo_emp"] = v["cred_autorizado"] - v["emp_ate"]
+        v["saldo_liq"] = v["cred_autorizado"] - v["liq_ate"]
+        v["restos"] = 0.0
+        return v
+
+    if not base.empty:
+        mask_cor = (base["grupo"] == "3") & (base["modalidade"] != "91")
+        mask_cor50 = mask_cor & (base["modalidade"] == "50")
+        mask_cor90 = mask_cor & (base["modalidade"] == "90")
+        mask_cap = (base["grupo"] == "4") & (base["modalidade"] != "91")
+        mask_cap90 = mask_cap & (base["modalidade"] == "90")
+        mask_intra = (base["modalidade"] == "91")
+        mask_all = pd.Series([True] * len(base), index=base.index)
+    else:
+        mask_cor = mask_cor50 = mask_cor90 = mask_cap = mask_cap90 = mask_intra = mask_all = pd.Series(dtype=bool)
+
+    v_cor = somar(mask_cor); v_cor50 = somar(mask_cor50); v_cor90 = somar(mask_cor90)
+    v_cap = somar(mask_cap); v_cap90 = somar(mask_cap90); v_intra = somar(mask_intra)
+    v_sub = somar(mask_all); v_zero = {k: 0.0 for k in v_sub}
+    v_sup = {**v_zero, "emp_no_bim": max(receita_bim - v_sub["emp_no_bim"], 0), "emp_ate": max(receita_ate - v_sub["emp_ate"], 0), "liq_no_bim": max(receita_bim - v_sub["liq_no_bim"], 0), "liq_ate": max(receita_ate - v_sub["liq_ate"], 0), "pago_ate": max(receita_ate - v_sub["pago_ate"], 0)}
+
+    linhas = [
+        ("DESPESAS (EXCETO INTRA-ORCAMENTARIAS) (VIII)", somar(mask_cor | mask_cap) if not base.empty else v_zero, "total"),
+        ("DESPESAS CORRENTES", v_cor, "grupo"),
+        ("Inst. privadas sem fins lucrativos (mod. 50)", v_cor50, "item"),
+        ("Outras Desp.Correntes (modalidade 90)", v_cor90, "item"),
+        ("DESPESAS DE CAPITAL", v_cap, "grupo"),
+        ("Investimentos (modalidade 90)", v_cap90, "item"),
+        ("DESPESAS (INTRA-ORCAMENTARIAS) (IX) (91)", v_intra, "grupo"),
+        ("SUBTOTAL DESPESAS (X) = (VIII+IX)", v_sub, "total"),
+        ("AMORTIZACAO DA DIVIDA / REFINANCIAMENTO (XI)", v_zero, "grupo"),
+        ("Amortizacao da Divida Interna", v_zero, "item"),
+        ("Amortizacao da Divida Externa", v_zero, "item"),
+        ("TOTAL DAS DESPESAS (XII) = (X+XI)", v_sub, "total"),
+        ("SUPERAVIT (XIII)", v_sup, "total"),
+    ]
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        workbook = writer.book
+        worksheet = workbook.add_worksheet("Anexo_IA")
+        writer.sheets["Anexo_IA"] = worksheet
+        f = criar_formatos_excel(workbook)
+        worksheet.set_column("A:A", 48); worksheet.set_column("B:K", 16)
+        worksheet.merge_range(0, 0, 2, 0, "DESPESAS", f["fmt_header"])
+        worksheet.merge_range(0, 1, 2, 1, "DOTACAO INICIAL\n(a)", f["fmt_header"])
+        worksheet.merge_range(0, 2, 2, 2, "DOTACAO\nATUALIZADA\n(c)", f["fmt_header"])
+        worksheet.merge_range(0, 3, 0, 5, "DESPESAS EMPENHADAS", f["fmt_header"])
+        worksheet.write(1, 3, "NO BIMESTRE\n" + periodo, f["fmt_header"]); worksheet.write(1, 4, "ATE O BIMESTRE\n" + periodo, f["fmt_header"]); worksheet.write(1, 5, "Saldo\n(g)=c-f", f["fmt_header"])
+        worksheet.merge_range(0, 6, 0, 8, "DESPESAS EXECUTADAS", f["fmt_header"])
+        worksheet.write(1, 6, "LIQUIDADAS", f["fmt_header"]); worksheet.write(1, 7, "LIQUIDADAS", f["fmt_header"]); worksheet.write(1, 8, "Saldo\n(i)=c-h", f["fmt_header"])
+        worksheet.write(2, 3, ""); worksheet.write(2, 4, ""); worksheet.write(2, 5, "")
+        worksheet.write(2, 6, "NO BIMESTRE\n" + periodo, f["fmt_header"]); worksheet.write(2, 7, "ATE O BIMESTRE\n" + periodo, f["fmt_header"]); worksheet.write(2, 8, "", f["fmt_header"])
+        worksheet.merge_range(0, 9, 2, 9, "Despesas pagas\nate o mes\n(j)", f["fmt_header"])
+        worksheet.merge_range(0, 10, 2, 10, "INSCRITAS EM\nRESTOS A\nPAGAR NAO\nPROCESSADOS (k)", f["fmt_header"])
+        row = 3
+        for desc, vals, tipo in linhas:
+            fd = f["fmt_total_text"] if tipo == "total" else (f["fmt_group"] if tipo == "grupo" else f["fmt_item"])
+            fn = f["fmt_money_total"] if tipo == "total" else f["fmt_money"]
+            worksheet.write(row, 0, desc, fd)
+            for ci, key in enumerate(["orcado_inicial", "cred_autorizado", "emp_no_bim", "emp_ate", "saldo_emp", "liq_no_bim", "liq_ate", "saldo_liq", "pago_ate", "restos"]):
+                worksheet.write_number(row, ci + 1, vals.get(key, 0), fn)
+            row += 1
+        worksheet.freeze_panes(3, 1)
+    return output.getvalue()
+
+
+def gerar_excel_anexo2(df_orc, df_exec, meses_bim, meses_ate_agora):
+    base = preparar_base_funcional_lrf(df_orc, df_exec, meses_bim, meses_ate_agora)
+    periodo = periodo_bimestre_extenso(meses_bim)
+    total_emp = float(base["emp_ate"].sum()) if not base.empty else 0.0
+    total_liq = float(base["liq_ate"].sum()) if not base.empty else 0.0
+    linhas = []
+    if not base.empty:
+        for funcao in sorted(base["funcao"].astype(str).unique()):
+            df_f = base[base["funcao"].astype(str) == str(funcao)].copy()
+            vf = {"orcado_inicial": float(df_f["orcado_inicial"].sum()), "cred_autorizado": float(df_f["cred_autorizado"].sum()), "emp_no_bim": float(df_f["emp_no_bim"].sum()), "emp_ate": float(df_f["emp_ate"].sum()), "perc_emp": safe_div(float(df_f["emp_ate"].sum()), total_emp), "saldo_emp": float(df_f["cred_autorizado"].sum() - df_f["emp_ate"].sum()), "liq_no_bim": float(df_f["liq_no_bim"].sum()), "liq_ate": float(df_f["liq_ate"].sum()), "perc_liq": safe_div(float(df_f["liq_ate"].sum()), total_liq), "saldo_liq": float(df_f["cred_autorizado"].sum() - df_f["liq_ate"].sum()), "restos": 0.0}
+            linhas.append(("FUNCAO " + str(funcao), vf, "grupo"))
+            for subf in sorted(df_f["subfuncao"].astype(str).unique()):
+                df_s = df_f[df_f["subfuncao"].astype(str) == str(subf)].copy()
+                vs = {"orcado_inicial": float(df_s["orcado_inicial"].sum()), "cred_autorizado": float(df_s["cred_autorizado"].sum()), "emp_no_bim": float(df_s["emp_no_bim"].sum()), "emp_ate": float(df_s["emp_ate"].sum()), "perc_emp": safe_div(float(df_s["emp_ate"].sum()), total_emp), "saldo_emp": float(df_s["cred_autorizado"].sum() - df_s["emp_ate"].sum()), "liq_no_bim": float(df_s["liq_no_bim"].sum()), "liq_ate": float(df_s["liq_ate"].sum()), "perc_liq": safe_div(float(df_s["liq_ate"].sum()), total_liq), "saldo_liq": float(df_s["cred_autorizado"].sum() - df_s["liq_ate"].sum()), "restos": 0.0}
+                linhas.append(("Subfuncao " + str(subf), vs, "item"))
+    vt = {"orcado_inicial": float(base["orcado_inicial"].sum()) if not base.empty else 0.0, "cred_autorizado": float(base["cred_autorizado"].sum()) if not base.empty else 0.0, "emp_no_bim": float(base["emp_no_bim"].sum()) if not base.empty else 0.0, "emp_ate": total_emp, "perc_emp": 1.0 if total_emp > 0 else 0.0, "saldo_emp": float(base["cred_autorizado"].sum() - base["emp_ate"].sum()) if not base.empty else 0.0, "liq_no_bim": float(base["liq_no_bim"].sum()) if not base.empty else 0.0, "liq_ate": total_liq, "perc_liq": 1.0 if total_liq > 0 else 0.0, "saldo_liq": float(base["cred_autorizado"].sum() - base["liq_ate"].sum()) if not base.empty else 0.0, "restos": 0.0}
+    linhas.append(("TOTAL", vt, "total"))
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        workbook = writer.book
+        worksheet = workbook.add_worksheet("Anexo_II")
+        writer.sheets["Anexo_II"] = worksheet
+        f = criar_formatos_excel(workbook)
+        worksheet.set_column("A:A", 32); worksheet.set_column("B:L", 14)
+        worksheet.merge_range(0, 0, 2, 0, "FUNCAO/\nSUBFUNCAO", f["fmt_header"])
+        worksheet.merge_range(0, 1, 2, 1, "DOTACAO\nINICIAL", f["fmt_header"])
+        worksheet.merge_range(0, 2, 2, 2, "DOTACAO\nATUALIZADA\n(a)", f["fmt_header"])
+        worksheet.merge_range(0, 3, 0, 6, "DESPESA EMPENHADA", f["fmt_header"])
+        worksheet.write(1, 3, "NO BIMESTRE\n" + periodo, f["fmt_header"]); worksheet.write(1, 4, "ATE O BIMESTRE\n" + periodo + "\n(b)", f["fmt_header"]); worksheet.write(1, 5, "%\n(b/total b)", f["fmt_header"]); worksheet.write(1, 6, "SALDO\n(c)=(a-b)", f["fmt_header"])
+        worksheet.merge_range(0, 7, 0, 10, "DESPESA LIQUIDADA", f["fmt_header"])
+        worksheet.write(1, 7, "NO BIMESTRE\n" + periodo, f["fmt_header"]); worksheet.write(1, 8, "ATE O BIMESTRE\n" + periodo + "\n(d)", f["fmt_header"]); worksheet.write(1, 9, "%\n(d/total d)", f["fmt_header"]); worksheet.write(1, 10, "SALDO\n(e)=(a-d)", f["fmt_header"])
+        worksheet.merge_range(0, 11, 2, 11, "INSCRITAS EM\nRESTOS A\nPAGAR NAO\nPROCESSADOS (f)", f["fmt_header"])
+        for c in range(3, 11):
+            worksheet.write(2, c, "", f["fmt_header"])
+        row = 3
+        for desc, vals, tipo in linhas:
+            fd = f["fmt_total_text"] if tipo == "total" else (f["fmt_group"] if tipo == "grupo" else f["fmt_item"])
+            fn = f["fmt_money_total"] if tipo == "total" else f["fmt_money"]
+            fp = f["fmt_pct_total"] if tipo == "total" else f["fmt_pct"]
+            worksheet.write(row, 0, desc, fd)
+            worksheet.write_number(row, 1, vals.get("orcado_inicial", 0), fn)
+            worksheet.write_number(row, 2, vals.get("cred_autorizado", 0), fn)
+            worksheet.write_number(row, 3, vals.get("emp_no_bim", 0), fn)
+            worksheet.write_number(row, 4, vals.get("emp_ate", 0), fn)
+            worksheet.write_number(row, 5, vals.get("perc_emp", 0), fp)
+            worksheet.write_number(row, 6, vals.get("saldo_emp", 0), fn)
+            worksheet.write_number(row, 7, vals.get("liq_no_bim", 0), fn)
+            worksheet.write_number(row, 8, vals.get("liq_ate", 0), fn)
+            worksheet.write_number(row, 9, vals.get("perc_liq", 0), fp)
+            worksheet.write_number(row, 10, vals.get("saldo_liq", 0), fn)
+            worksheet.write_number(row, 11, vals.get("restos", 0), fn)
+            row += 1
+        worksheet.freeze_panes(3, 1)
+    return output.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +856,7 @@ df_exec = pd.read_sql("SELECT * FROM execucao",      conn_main)
 df_sub  = pd.read_sql("SELECT * FROM sub_elementos", conn_main)
 conn_main.close()
 
-tab1, tab2, tab3 = st.tabs(["Receitas", "Despesas", "Comparativo"])
+tab1, tab2, tab3, tab4 = st.tabs(["Receitas", "Despesas", "Comparativo", "Relatorios LRF"])
 
 
 # ---------------------------------------------------------------------------
@@ -918,3 +1252,48 @@ with tab3:
             height=400, barmode="group", margin=dict(l=0, r=0, t=30, b=0)
         )
         st.plotly_chart(fig_c, width='stretch')
+
+
+# ---------------------------------------------------------------------------
+# ABA 4: RELATORIOS LRF
+# ---------------------------------------------------------------------------
+with tab4:
+    st.subheader("Relatorios LRF - Anexos Bimestrais")
+    if df_rec.empty and df_exec.empty and df_orc.empty:
+        st.info("Importe dados de Receita, Orcamento e Execucao para gerar os anexos.")
+    else:
+        bim = st.selectbox("Bimestre de referencia:", list(BIMESTRES.keys()), key="bim_lrf")
+        meses_bim = BIMESTRES[bim]
+        meses_ate_agora = list(range(1, max(meses_bim) + 1))
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.write("**Anexo I — Receitas**")
+        c1.caption("Previsao x Realizado por categoria/natureza")
+        c1.download_button(
+            "Baixar Anexo I (.xlsx)",
+            data=gerar_excel_anexo1(df_rec, meses_bim, meses_ate_agora),
+            file_name="AnexoI_LRF.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="lrf1"
+        )
+
+        c2.write("**Anexo IA — Despesas por Natureza**")
+        c2.caption("Dotacao x Empenhado x Liquidado x Pago por natureza")
+        c2.download_button(
+            "Baixar Anexo IA (.xlsx)",
+            data=gerar_excel_anexo1a(df_orc, df_exec, df_rec, meses_bim, meses_ate_agora),
+            file_name="AnexoIA_LRF.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="lrf1a"
+        )
+
+        c3.write("**Anexo II — Despesas por Funcao**")
+        c3.caption("Dotacao x Empenhado x Liquidado por funcao/subfuncao")
+        c3.download_button(
+            "Baixar Anexo II (.xlsx)",
+            data=gerar_excel_anexo2(df_orc, df_exec, meses_bim, meses_ate_agora),
+            file_name="AnexoII_LRF.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="lrf2"
+        )
