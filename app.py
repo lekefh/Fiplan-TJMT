@@ -528,21 +528,41 @@ def _estilos_pdf():
 
 
 def _tabela_pdf(dados, col_w):
-    t = Table(dados, colWidths=col_w, repeatRows=1)
+    """Cria tabela ReportLab com word-wrap automático em todas as células."""
+    s = getSampleStyleSheet()
+    _st_h = ParagraphStyle(
+        "_th", parent=s["Normal"], fontSize=7.5, leading=10,
+        textColor=rl_c.white, fontName="Helvetica-Bold", wordWrap="LTR"
+    )
+    _st_b = ParagraphStyle(
+        "_tb", parent=s["Normal"], fontSize=7.5, leading=10, wordWrap="LTR"
+    )
+    _st_br = ParagraphStyle(
+        "_tbr", parent=s["Normal"], fontSize=7.5, leading=10,
+        wordWrap="LTR", alignment=2   # TA_RIGHT
+    )
+    dados_fmt = []
+    for i, row in enumerate(dados):
+        linha = []
+        for j, cell in enumerate(row):
+            if i == 0:
+                linha.append(Paragraph(str(cell), _st_h))
+            elif j >= 1:
+                linha.append(Paragraph(str(cell), _st_br))
+            else:
+                linha.append(Paragraph(str(cell), _st_b))
+        dados_fmt.append(linha)
+
+    t = Table(dados_fmt, colWidths=col_w, repeatRows=1)
     t.setStyle(TableStyle([
         ("BACKGROUND",    (0, 0), (-1,  0), _RL_AZUL),
-        ("TEXTCOLOR",     (0, 0), (-1,  0), rl_c.white),
-        ("FONTNAME",      (0, 0), (-1,  0), "Helvetica-Bold"),
-        ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
-        ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
-        ("ALIGN",         (1, 0), (-1, -1), "RIGHT"),
-        ("ALIGN",         (0, 0), ( 0, -1), "LEFT"),
         ("ROWBACKGROUNDS",(0, 1), (-1, -1), [rl_c.white, _RL_CINZA]),
         ("GRID",          (0, 0), (-1, -1), 0.35, rl_c.lightgrey),
         ("TOPPADDING",    (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         ("LEFTPADDING",   (0, 0), (-1, -1), 4),
         ("RIGHTPADDING",  (0, 0), (-1, -1), 4),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
     return t
 
@@ -784,12 +804,12 @@ def gerar_pdf_701(df_sv, df_sub_total, mes_sel, filtros_str):
         for _, r in df_tab.sort_values("liquidado", ascending=False).iterrows():
             pct = r["liquidado"] / tot_t * 100 if tot_t > 0 else 0
             rows.append([
-                sem_acento(str(r["subelemento_desc"]))[:38],
-                sem_acento(str(r["natureza_desc"]))[:30],
+                sem_acento(str(r["subelemento_desc"])),
+                sem_acento(str(r["natureza_desc"])),
                 f"{r['liquidado']:,.2f}", f"{r['pago']:,.2f}", f"{pct:.1f}%"
             ])
         if len(rows) > 1:
-            el.append(_tabela_pdf(rows, [4.5*cm, 4*cm, 3.5*cm, 3.5*cm, 2*cm]))
+            el.append(_tabela_pdf(rows, [5.5*cm, 5*cm, 3*cm, 2.5*cm, 1.5*cm]))
 
     doc.build(el)
     buf.seek(0)
