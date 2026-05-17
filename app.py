@@ -694,6 +694,31 @@ def gerar_pdf_despesas(df_ef, cred_banco, mes_sel, filtros_str):
     return buf.getvalue()
 
 
+def _limpar_labels(series, max_len=40):
+    """Remove acentos e trunca labels para evitar falhas no matplotlib."""
+    resultado = []
+    for v in series:
+        s = sem_acento(str(v).replace("\xa0", " ").strip())
+        resultado.append(s[:max_len])
+    return resultado
+
+
+def _h_bytes_seguro(labels, valores, cor=None, pcts=None):
+    """Wrapper de _grafico_h_bytes com sanitização e cap de altura."""
+    labels_limpos = _limpar_labels(labels)
+    cor = cor or COR_AZUL
+    try:
+        return _grafico_h_bytes(labels_limpos, valores, cor=cor, pcts=pcts)
+    except Exception:
+        # Fallback: gráfico sem labels
+        return _grafico_h_bytes(
+            [str(i + 1) for i in range(len(valores))], valores, cor=cor)
+
+
+# Altura máxima de gráfico que cabe em A4 com margens (cm)
+_MAX_H_GRAF = 20 * cm
+
+
 def gerar_pdf_701(df_sv, df_sub_total, mes_sel, filtros_str):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
@@ -706,47 +731,50 @@ def gerar_pdf_701(df_sv, df_sub_total, mes_sel, filtros_str):
     _header_pdf(el, st1, st2, "RELATÓRIO DE SUB-ELEMENTOS (FIP 701)", periodo,
                 filtros_str or "Sem filtros adicionais")
 
-    liq_sel  = float(df_sv["liquidado"].sum())        if not df_sv.empty       else 0
-    pago_sel = float(df_sv["pago"].sum())             if not df_sv.empty       else 0
+    liq_sel  = float(df_sv["liquidado"].sum())        if not df_sv.empty        else 0
+    pago_sel = float(df_sv["pago"].sum())             if not df_sv.empty        else 0
     liq_tot  = float(df_sub_total["liquidado"].sum()) if not df_sub_total.empty else 0
     pago_tot = float(df_sub_total["pago"].sum())      if not df_sub_total.empty else 0
 
     el.append(_tabela_pdf([
         ["Métrica", "Filtro (R$)", "Total Banco (R$)", "% Filtro / Total"],
         ["Liquidado", f"{liq_sel:,.2f}",  f"{liq_tot:,.2f}",
-         f"{liq_sel /liq_tot *100 if liq_tot >0 else 0:.1f}%"],
+         f"{liq_sel / liq_tot * 100 if liq_tot > 0 else 0:.1f}%"],
         ["Pago",      f"{pago_sel:,.2f}", f"{pago_tot:,.2f}",
-         f"{pago_sel/pago_tot*100 if pago_tot>0 else 0:.1f}%"],
+         f"{pago_sel / pago_tot * 100 if pago_tot > 0 else 0:.1f}%"],
     ], [4*cm, 5*cm, 5*cm, 3*cm]))
     el.append(Spacer(1, 10))
 
     if not df_sv.empty:
+        # --- Gráfico por sub-elemento (Top 20) ---
         df_sub_g = (df_sv.groupby("subelemento_desc")[["liquidado"]]
                     .sum().reset_index()
                     .sort_values("liquidado", ascending=True).tail(20))
-        tot_s = float(df_sub_g["liquidado"].sum())
+        tot_s  = float(df_sub_g["liquidado"].sum())
         pcts_s = [v / tot_s * 100 if tot_s > 0 else 0 for v in df_sub_g["liquidado"]]
-        el.append(Paragraph("Liquidado por Sub-elemento (Top 20)", stS))
+        h_sub  = min(_MAX_H_GRAF, max(5*cm, len(df_sub_g) * 1.1*cm))
+        el.append(Paragraph(f"Liquidado por Sub-elemento (Top {len(df_sub_g)})", stS))
         el.append(RLImage(
-            _grafico_h_bytes(
-                list(df_sub_g["subelemento_desc"].str[:40]),
-                list(df_sub_g["liquidado"]), pcts=pcts_s),
-            width=17*cm, height=max(5*cm, len(df_sub_g) * 1.1*cm)))
+            _h_bytes_seguro(list(df_sub_g["subelemento_desc"]), list(df_sub_g["liquidado"]),
+                            pcts=pcts_s),
+            width=17*cm, height=h_sub))
         el.append(Spacer(1, 8))
 
+        # --- Gráfico por natureza (Top 15) ---
         df_nat = (df_sv.groupby(["natureza_cod", "natureza_desc"])[["liquidado"]]
                   .sum().reset_index()
-                  .sort_values("liquidado", ascending=True))
+                  .sort_values("liquidado", ascending=True).tail(15))
         tot_n  = float(df_nat["liquidado"].sum())
         pcts_n = [v / tot_n * 100 if tot_n > 0 else 0 for v in df_nat["liquidado"]]
-        el.append(Paragraph("Liquidado por Natureza de Despesa", stS))
+        h_nat  = min(_MAX_H_GRAF, max(3.5*cm, len(df_nat) * 1.3*cm))
+        el.append(Paragraph(f"Liquidado por Natureza de Despesa (Top {len(df_nat)})", stS))
         el.append(RLImage(
-            _grafico_h_bytes(
-                list(df_nat["natureza_desc"].str[:45]),
-                list(df_nat["liquidado"]), cor=COR_VERDE, pcts=pcts_n),
-            width=17*cm, height=max(3.5*cm, len(df_nat) * 1.1*cm)))
+            _h_bytes_seguro(list(df_nat["natureza_desc"]), list(df_nat["liquidado"]),
+                            cor=COR_VERDE, pcts=pcts_n),
+            width=17*cm, height=h_nat))
         el.append(Spacer(1, 8))
 
+        # --- Tabela de detalhamento ---
         el.append(Paragraph("Detalhamento Completo", stS))
         df_tab = (df_sv.groupby(
             ["subelemento_cod", "subelemento_desc", "natureza_cod", "natureza_desc"])
@@ -755,8 +783,11 @@ def gerar_pdf_701(df_sv, df_sub_total, mes_sel, filtros_str):
         rows  = [["Sub-elemento", "Natureza", "Liquidado (R$)", "Pago (R$)", "% s/Total"]]
         for _, r in df_tab.sort_values("liquidado", ascending=False).iterrows():
             pct = r["liquidado"] / tot_t * 100 if tot_t > 0 else 0
-            rows.append([str(r["subelemento_desc"])[:35], str(r["natureza_desc"])[:30],
-                         f"{r['liquidado']:,.2f}", f"{r['pago']:,.2f}", f"{pct:.1f}%"])
+            rows.append([
+                sem_acento(str(r["subelemento_desc"]))[:38],
+                sem_acento(str(r["natureza_desc"]))[:30],
+                f"{r['liquidado']:,.2f}", f"{r['pago']:,.2f}", f"{pct:.1f}%"
+            ])
         if len(rows) > 1:
             el.append(_tabela_pdf(rows, [4.5*cm, 4*cm, 3.5*cm, 3.5*cm, 2*cm]))
 
