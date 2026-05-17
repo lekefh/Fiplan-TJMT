@@ -765,6 +765,69 @@ def gerar_pdf_701(df_sv, df_sub_total, mes_sel, filtros_str):
     return buf.getvalue()
 
 
+def gerar_pdf_comparativo(tr, te, tl, tp, v_orc, mes_sel, df_rec, df_exec):
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+          topMargin=1.3*cm, bottomMargin=1.3*cm,
+          leftMargin=1.5*cm, rightMargin=1.5*cm)
+    st1, st2, stS, stC = _estilos_pdf()
+    el = []
+    periodo = (" / ".join(MESES_NOMES[m - 1] for m in sorted(mes_sel))
+               if mes_sel else "—")
+    _header_pdf(el, st1, st2, "RELATÓRIO COMPARATIVO — RECEITA × DESPESA",
+                periodo, "Período selecionado")
+
+    sup_fin  = tr - tp
+    sup_orc  = tr - te
+    pct_emp  = te / tr * 100 if tr > 0 else 0
+    pct_liq  = tl / tr * 100 if tr > 0 else 0
+    pct_pag  = tp / tr * 100 if tr > 0 else 0
+    pct_cred = te / v_orc * 100 if v_orc > 0 else 0
+
+    el.append(_tabela_pdf([
+        ["Indicador", "Valor (R$)", "% s/ Receita Arrecadada"],
+        ["Receita Arrecadada",  f"{tr:,.2f}", "100,00%"],
+        ["Cred. Autorizado",    f"{v_orc:,.2f}", "—"],
+        ["Desp. Empenhada",     f"{te:,.2f}", f"{pct_emp:.2f}%"],
+        ["Desp. Liquidada",     f"{tl:,.2f}", f"{pct_liq:.2f}%"],
+        ["Desp. Paga",          f"{tp:,.2f}", f"{pct_pag:.2f}%"],
+        ["Superávit Financeiro (Rec. - Pago)",     f"{sup_fin:,.2f}", "—"],
+        ["Superávit Orçamentário (Rec. - Emp.)",   f"{sup_orc:,.2f}", "—"],
+    ], [7*cm, 5.5*cm, 5*cm]))
+    el.append(Spacer(1, 12))
+
+    # Gráfico mensal receita vs despesa
+    if not df_rec.empty and not df_exec.empty and mes_sel:
+        meses_comuns = sorted(set(mes_sel))
+        rec_m = (df_rec[df_rec["mes"].isin(meses_comuns)]
+                 .groupby("mes")["realizado"].sum().reindex(meses_comuns, fill_value=0))
+        emp_m = (df_exec[df_exec["mes"].isin(meses_comuns)]
+                 .groupby("mes")["empenhado"].sum().reindex(meses_comuns, fill_value=0))
+        liq_m = (df_exec[df_exec["mes"].isin(meses_comuns)]
+                 .groupby("mes")["liquidado"].sum().reindex(meses_comuns, fill_value=0))
+        labels_m = [MESES_NOMES[m - 1] for m in meses_comuns]
+        el.append(Paragraph("Receita vs Despesas por Mês", stS))
+        el.append(RLImage(
+            _grafico_barras_bytes(labels_m, list(rec_m), list(emp_m),
+                                  "Receita Arrecadada", "Desp. Empenhada"),
+            width=17*cm, height=7*cm))
+        el.append(Spacer(1, 8))
+
+        # Liquidado vs Pago
+        el.append(Paragraph("Desp. Liquidada vs Paga por Mês", stS))
+        el.append(RLImage(
+            _grafico_barras_bytes(labels_m, list(liq_m),
+                                  list(df_exec[df_exec["mes"].isin(meses_comuns)]
+                                       .groupby("mes")["pago"].sum()
+                                       .reindex(meses_comuns, fill_value=0)),
+                                  "Liquidado", "Pago"),
+            width=17*cm, height=7*cm))
+
+    doc.build(el)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # BANCO DE DADOS
 # ---------------------------------------------------------------------------
@@ -1608,34 +1671,38 @@ with tab2:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            # Horizontal por natureza
-            df_nat_agg = (df_ef.groupby("natureza")[["empenhado", "liquidado", "pago"]]
+            # Horizontal por natureza (top 20 por liquidado)
+            df_nat_agg = (df_ef.groupby("natureza")[["empenhado", "liquidado"]]
                           .sum().reset_index()
-                          .sort_values("liquidado", ascending=True))
+                          .sort_values("liquidado", ascending=True)
+                          .tail(20))
+            # Garantir que os rótulos do eixo Y sejam strings (evita escala numérica)
+            df_nat_agg["nat_label"] = df_nat_agg["natureza"].astype(str).str.strip()
             tot_liq_nat = float(df_nat_agg["liquidado"].sum())
             fig_nat = go.Figure()
             fig_nat.add_trace(go.Bar(
-                y=df_nat_agg["natureza"].astype(str),
+                y=df_nat_agg["nat_label"],
                 x=df_nat_agg["empenhado"], name="Empenhado",
-                orientation="h", marker_color=COR_AZUL, opacity=0.7
+                orientation="h", marker_color=COR_AZUL, opacity=0.65
             ))
             fig_nat.add_trace(go.Bar(
-                y=df_nat_agg["natureza"].astype(str),
+                y=df_nat_agg["nat_label"],
                 x=df_nat_agg["liquidado"], name="Liquidado",
                 orientation="h", marker_color=COR_VERDE,
                 text=["{:.1f}%".format(v / tot_liq_nat * 100)
                       if tot_liq_nat > 0 else "" for v in df_nat_agg["liquidado"]],
-                textposition="outside"
+                textposition="auto"
             ))
             fig_nat.update_layout(
-                title="Liquidado por Natureza — % s/ Total Liquidado",
-                height=max(300, len(df_nat_agg) * 38),
-                barmode="overlay",
-                margin=dict(l=0, r=0, t=40, b=0),
+                title="Liquidado por Natureza (Top 20) — % s/ Total Liquidado",
+                height=max(300, len(df_nat_agg) * 42),
+                barmode="group",
+                margin=dict(l=130, r=60, t=45, b=0),
                 plot_bgcolor="white",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02,
                             xanchor="right", x=1),
-                xaxis=dict(tickformat=",.0f", gridcolor="#F0F0F0")
+                xaxis=dict(tickformat=",.0f", gridcolor="#EEEEEE", rangemode="tozero"),
+                yaxis=dict(type="category", automargin=True, tickfont=dict(size=11))
             )
             st.plotly_chart(fig_nat, use_container_width=True)
 
@@ -1900,6 +1967,25 @@ with tab3:
             height=400, barmode="group", margin=dict(l=0, r=0, t=30, b=0)
         )
         st.plotly_chart(fig_c, width='stretch')
+
+        v_orc_comp = float(
+            df_orc[df_orc["mes"] == int(df_orc["mes"].max())]["cred_autorizado"].sum()
+            if not df_orc.empty else 0
+        )
+        try:
+            pdf_comp = gerar_pdf_comparativo(
+                float(tr), float(te), float(tl), float(tp),
+                v_orc_comp, list(ms_c), df_rec, df_exec
+            )
+            st.download_button(
+                "📄 Exportar Relatório PDF — Comparativo",
+                data=pdf_comp,
+                file_name="relatorio_comparativo.pdf",
+                mime="application/pdf",
+                key="pdf_comp"
+            )
+        except Exception as e:
+            st.warning("PDF indisponível: " + str(e))
 
 
 # ---------------------------------------------------------------------------
