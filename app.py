@@ -573,7 +573,7 @@ with st.sidebar:
                 for _, row in df.iterrows():
                     try:
                         uo = norm(gc616(row, 1))
-                        if not uo or uo in ("nan", ""):
+                        if not uo or uo in ("nan", "") or uo != "3101":
                             continue
                         ug        = norm(gc616(row, 2))
                         funcao    = norm(gc616(row, 3))
