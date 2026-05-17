@@ -592,9 +592,7 @@ with st.sidebar:
                     except Exception:
                         continue
 
-                conn.execute(
-                    "DELETE FROM orcamento WHERE ano=2026 AND mes=?", (m_final,)
-                )
+                conn.execute("DELETE FROM orcamento WHERE ano=2026")
                 conn.executemany(
                     "INSERT INTO orcamento VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", linhas
                 )
