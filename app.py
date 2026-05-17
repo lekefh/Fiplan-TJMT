@@ -424,6 +424,8 @@ def gerar_excel_anexo2(df_orc, df_exec, meses_bim, meses_ate_agora):
 # ---------------------------------------------------------------------------
 def inicializar_banco():
     conn = sqlite3.connect(DB_NAME)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS receitas ("
@@ -431,20 +433,12 @@ def inicializar_banco():
         "orcado REAL, realizado REAL, previsao REAL, "
         "categoria TEXT DEFAULT 'Nao Classificada')"
     )
-    try:
-        conn.execute(
-            "ALTER TABLE receitas ADD COLUMN categoria TEXT DEFAULT 'Nao Classificada'"
-        )
-    except Exception:
-        pass
-
     conn.execute(
         "CREATE TABLE IF NOT EXISTS orcamento ("
         "mes INTEGER, ano INTEGER, uo TEXT, ug TEXT, funcao TEXT, subfuncao TEXT, "
         "programa TEXT, projeto TEXT, natureza TEXT, fonte TEXT, "
         "orcado_inicial REAL, cred_autorizado REAL)"
     )
-
     conn.execute(
         "CREATE TABLE IF NOT EXISTS execucao ("
         "mes INTEGER, ano INTEGER, uo TEXT, ug TEXT, funcao TEXT, subfuncao TEXT, "
@@ -452,31 +446,39 @@ def inicializar_banco():
         "iduso TEXT, tipo_rec TEXT, "
         "empenhado REAL, liquidado REAL, pago REAL)"
     )
-
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sub_elementos ("
         "mes INTEGER, ano INTEGER, ug TEXT, paoe TEXT, natureza_cod TEXT, natureza_desc TEXT, "
         "subelemento_cod TEXT, subelemento_desc TEXT, fonte TEXT, "
         "liquidado REAL, pago REAL)"
     )
-    try:
-        conn.execute("ALTER TABLE sub_elementos ADD COLUMN ug TEXT DEFAULT ''")
-    except Exception:
-        pass
-
-    # Tabela para repasses recebidos (ANEXO V)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS anexo_v ("
         "mes INTEGER, ano INTEGER, data TEXT, "
         "entidade_repassadora TEXT, valor REAL, "
         "finalidade TEXT, fundamento_legal TEXT)"
     )
-
-    conn.execute(
-        "UPDATE receitas SET categoria='Receita Corrente' "
-        "WHERE categoria='Repasses Correntes'"
-    )
     conn.commit()
+
+    for stmt in [
+        "ALTER TABLE receitas ADD COLUMN categoria TEXT DEFAULT 'Nao Classificada'",
+        "ALTER TABLE sub_elementos ADD COLUMN ug TEXT DEFAULT ''",
+    ]:
+        try:
+            conn.execute(stmt)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+
+    try:
+        conn.execute(
+            "UPDATE receitas SET categoria='Receita Corrente' "
+            "WHERE categoria='Repasses Correntes'"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
     conn.close()
 
 
