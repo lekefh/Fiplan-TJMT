@@ -453,19 +453,16 @@ def inicializar_banco():
         "empenhado REAL, liquidado REAL, pago REAL)"
     )
 
-    cols_sub = [r[1] for r in conn.execute("PRAGMA table_info(sub_elementos)").fetchall()]
-    schema_correto = (
-        cols_sub == ["mes", "ano", "ug", "paoe", "natureza_cod", "natureza_desc",
-                     "subelemento_cod", "subelemento_desc", "fonte", "liquidado", "pago"]
-    )
-    if not schema_correto:
-        conn.execute("DROP TABLE IF EXISTS sub_elementos")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sub_elementos ("
         "mes INTEGER, ano INTEGER, ug TEXT, paoe TEXT, natureza_cod TEXT, natureza_desc TEXT, "
         "subelemento_cod TEXT, subelemento_desc TEXT, fonte TEXT, "
         "liquidado REAL, pago REAL)"
     )
+    try:
+        conn.execute("ALTER TABLE sub_elementos ADD COLUMN ug TEXT DEFAULT ''")
+    except Exception:
+        pass
 
     # Tabela para repasses recebidos (ANEXO V)
     conn.execute(
