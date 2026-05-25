@@ -1011,7 +1011,7 @@ with st.sidebar:
                     "DELETE FROM receitas WHERE ano=2026 AND mes=?", (m_final,)
                 )
                 conn.executemany(
-                    "INSERT INTO receitas VALUES (?,?,?,?,?,?,?,?)", dados
+                    "INSERT INTO receitas (mes, ano, codigo_full, natureza, orcado, realizado, previsao, categoria) VALUES (?,?,?,?,?,?,?,?)", dados
                 )
                 conn.commit()
                 st.success(
