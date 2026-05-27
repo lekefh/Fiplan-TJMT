@@ -880,6 +880,176 @@ def gerar_pdf_comparativo(tr, te, tl, tp, v_orc, mes_sel, df_rec, df_exec):
 
 
 # ---------------------------------------------------------------------------
+# RESTOS A PAGAR — PDF
+# ---------------------------------------------------------------------------
+def gerar_pdf_rp(df_rp_ref, mes_ref, meses_selecionados):
+    """Gera PDF de Restos a Pagar com base na FIP 226 do mês de referência."""
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+          topMargin=1.3*cm, bottomMargin=1.3*cm,
+          leftMargin=1.5*cm, rightMargin=1.5*cm)
+    st1, st2, stS, stC = _estilos_pdf()
+    el = []
+    periodo = " / ".join(MESES_NOMES[m - 1] for m in sorted(meses_selecionados))
+    _header_pdf(el, st1, st2, "RELATÓRIO DE RESTOS A PAGAR", periodo,
+                "FIP 226 — Referência: " + MESES_NOMES[mes_ref - 1])
+
+    proc_ins = float(df_rp_ref["proc_inscrito"].sum())
+    proc_pag = float(df_rp_ref["proc_pagos"].sum())
+    proc_can = float(df_rp_ref["proc_cancelados"].sum())
+    proc_apa = float(df_rp_ref["proc_a_pagar"].sum())
+    np_ins   = float(df_rp_ref["np_inscrito"].sum())
+    np_pag   = float(df_rp_ref["np_pagos"].sum())
+    np_can   = float(df_rp_ref["np_cancelados"].sum())
+    np_aliq  = float(df_rp_ref["np_a_liquidar"].sum())
+
+    tot_ins  = proc_ins + np_ins
+    tot_pag  = proc_pag + np_pag
+    tot_can  = proc_can + np_can
+    tot_aliq = proc_apa + np_aliq
+    tot_liq  = max(0.0, tot_ins - tot_aliq - tot_can)
+
+    el.append(_tabela_pdf([
+        ["Tipo", "Inscrito (R$)", "Pagos (R$)", "Cancelados (R$)", "A Liquidar (R$)", "Liquidados (R$)"],
+        ["Processados",
+         f"{proc_ins:,.2f}", f"{proc_pag:,.2f}", f"{proc_can:,.2f}",
+         f"{proc_apa:,.2f}", f"{max(0.0, proc_ins - proc_apa - proc_can):,.2f}"],
+        ["Não Processados",
+         f"{np_ins:,.2f}", f"{np_pag:,.2f}", f"{np_can:,.2f}",
+         f"{np_aliq:,.2f}", f"{max(0.0, np_ins - np_aliq - np_can):,.2f}"],
+        ["TOTAL",
+         f"{tot_ins:,.2f}", f"{tot_pag:,.2f}", f"{tot_can:,.2f}",
+         f"{tot_aliq:,.2f}", f"{tot_liq:,.2f}"],
+    ], [4*cm, 3*cm, 3*cm, 3*cm, 3*cm, 3*cm]))
+    el.append(Spacer(1, 10))
+
+    # Gráfico por tipo
+    el.append(Paragraph("Visão por Tipo de Resto a Pagar", stS))
+    labels_tipo = ["Processados", "Nao Processados"]
+    vals_ins  = [proc_ins, np_ins]
+    vals_pag  = [proc_pag, np_pag]
+    el.append(RLImage(
+        _grafico_barras_bytes(labels_tipo, vals_ins, vals_pag, "Inscrito", "Pago"),
+        width=14*cm, height=6*cm))
+    el.append(Spacer(1, 8))
+
+    # Top credores por inscrito
+    df_cred = (df_rp_ref.assign(inscrito_total=df_rp_ref["proc_inscrito"] + df_rp_ref["np_inscrito"])
+               .groupby("nome_credor", as_index=False)["inscrito_total"].sum()
+               .sort_values("inscrito_total", ascending=False).head(15))
+    if not df_cred.empty:
+        el.append(Paragraph("Top Credores — Total Inscrito", stS))
+        labels_c = _limpar_labels(df_cred["nome_credor"])
+        h_buf = _h_bytes_seguro(labels_c, list(df_cred["inscrito_total"]), cor=COR_AZUL)
+        h_img = min(_MAX_H_GRAF, max(3.5*cm, len(df_cred) * 1.3*cm))
+        el.append(RLImage(h_buf, width=17*cm, height=h_img))
+        el.append(Spacer(1, 8))
+
+    # Tabela por empenho (top 30)
+    df_det = (df_rp_ref[["num_empenho", "nome_credor", "proc_inscrito", "np_inscrito",
+                          "proc_pagos", "np_pagos", "proc_cancelados", "np_cancelados",
+                          "np_a_liquidar", "proc_a_pagar"]]
+              .copy())
+    df_det["inscrito"] = df_det["proc_inscrito"] + df_det["np_inscrito"]
+    df_det = df_det.sort_values("inscrito", ascending=False).head(30)
+    if not df_det.empty:
+        el.append(Paragraph("Detalhamento por Empenho (Top 30 por Inscrito)", stS))
+        rows_tab = [["Empenho", "Credor", "Inscrito", "Pagos", "Cancelados", "A Liquidar"]]
+        for _, r in df_det.iterrows():
+            rows_tab.append([
+                str(r["num_empenho"]),
+                str(r["nome_credor"])[:40],
+                f"{r['inscrito']:,.2f}",
+                f"{r['proc_pagos'] + r['np_pagos']:,.2f}",
+                f"{r['proc_cancelados'] + r['np_cancelados']:,.2f}",
+                f"{r['proc_a_pagar'] + r['np_a_liquidar']:,.2f}",
+            ])
+        el.append(_tabela_pdf(rows_tab, [4*cm, 5.5*cm, 2.5*cm, 2.5*cm, 2.5*cm, 2.5*cm]))
+
+    doc.build(el)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def gerar_excel_rp(df_rp, meses_bim, meses_ate_agora):
+    """Gera planilha LRF de Restos a Pagar."""
+    mes_ref = max(m for m in df_rp["mes"].unique() if m in meses_ate_agora) if not df_rp.empty else None
+    if mes_ref is None:
+        return io.BytesIO().getvalue()
+    df_ref = df_rp[df_rp["mes"] == mes_ref]
+    df_bim = df_rp[df_rp["mes"].isin(meses_bim)] if not df_rp.empty else pd.DataFrame()
+
+    periodo = periodo_bimestre_extenso(meses_bim)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        workbook = writer.book
+        ws = workbook.add_worksheet("RP_LRF")
+        writer.sheets["RP_LRF"] = ws
+        f = criar_formatos_excel(workbook)
+        ws.set_column("A:A", 36)
+        ws.set_column("B:F", 18)
+
+        # Cabeçalho
+        ws.merge_range(0, 0, 1, 0, "RESTOS A PAGAR", f["fmt_header"])
+        ws.merge_range(0, 1, 1, 1, "INSCRITO\n(R$)", f["fmt_header"])
+        ws.merge_range(0, 2, 1, 2, "PAGOS\nNO BIMESTRE\n" + periodo, f["fmt_header"])
+        ws.merge_range(0, 3, 1, 3, "PAGOS\nATE O BIMESTRE", f["fmt_header"])
+        ws.merge_range(0, 4, 1, 4, "CANCELADOS\nATE O BIMESTRE", f["fmt_header"])
+        ws.merge_range(0, 5, 1, 5, "A LIQUIDAR /\nA PAGAR", f["fmt_header"])
+        ws.merge_range(0, 6, 1, 6, "LIQUIDADOS\n(Calculado)", f["fmt_header"])
+
+        def soma_rp(df, col):
+            return float(df[col].sum()) if not df.empty and col in df.columns else 0.0
+
+        proc_ins_ref  = soma_rp(df_ref, "proc_inscrito")
+        proc_pag_ref  = soma_rp(df_ref, "proc_pagos")
+        proc_can_ref  = soma_rp(df_ref, "proc_cancelados")
+        proc_apa_ref  = soma_rp(df_ref, "proc_a_pagar")
+        np_ins_ref    = soma_rp(df_ref, "np_inscrito")
+        np_pag_ref    = soma_rp(df_ref, "np_pagos")
+        np_can_ref    = soma_rp(df_ref, "np_cancelados")
+        np_aliq_ref   = soma_rp(df_ref, "np_a_liquidar")
+
+        proc_pag_bim  = soma_rp(df_bim, "proc_pagos")
+        np_pag_bim    = soma_rp(df_bim, "np_pagos")
+
+        linhas_xls = [
+            ("Processados",
+             proc_ins_ref, proc_pag_bim, proc_pag_ref, proc_can_ref,
+             proc_apa_ref, max(0.0, proc_ins_ref - proc_apa_ref - proc_can_ref),
+             "grupo"),
+            ("Nao Processados",
+             np_ins_ref, np_pag_bim, np_pag_ref, np_can_ref,
+             np_aliq_ref, max(0.0, np_ins_ref - np_aliq_ref - np_can_ref),
+             "grupo"),
+            ("TOTAL GERAL",
+             proc_ins_ref + np_ins_ref,
+             proc_pag_bim + np_pag_bim,
+             proc_pag_ref + np_pag_ref,
+             proc_can_ref + np_can_ref,
+             proc_apa_ref + np_aliq_ref,
+             max(0.0, (proc_ins_ref + np_ins_ref) - (proc_apa_ref + np_aliq_ref) - (proc_can_ref + np_can_ref)),
+             "total"),
+        ]
+
+        row = 2
+        for desc, ins, pag_bim, pag_ate, can_ate, aliq, liq, tipo in linhas_xls:
+            fd = f["fmt_total_text"] if tipo == "total" else f["fmt_group"]
+            fn = f["fmt_money_total"] if tipo == "total" else f["fmt_money"]
+            ws.write(row, 0, desc, fd)
+            ws.write_number(row, 1, ins, fn)
+            ws.write_number(row, 2, pag_bim, fn)
+            ws.write_number(row, 3, pag_ate, fn)
+            ws.write_number(row, 4, can_ate, fn)
+            ws.write_number(row, 5, aliq, fn)
+            ws.write_number(row, 6, liq, fn)
+            row += 1
+
+        ws.freeze_panes(2, 1)
+    return output.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # BANCO DE DADOS
 # ---------------------------------------------------------------------------
 def inicializar_banco():
@@ -918,6 +1088,15 @@ def inicializar_banco():
         "entidade_repassadora TEXT, valor REAL, "
         "finalidade TEXT, fundamento_legal TEXT)"
     )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS restos_a_pagar ("
+        "mes INTEGER, ano INTEGER, "
+        "cod_credor TEXT, nome_credor TEXT, num_empenho TEXT, data_empenho TEXT, "
+        "dotacao TEXT, "
+        "proc_inscrito REAL, proc_pagos REAL, proc_cancelados REAL, proc_a_pagar REAL, "
+        "np_inscrito REAL, np_pagos REAL, np_cancelados REAL, np_a_pagar REAL, "
+        "np_em_liquidacao REAL, np_a_liquidar REAL)"
+    )
     conn.commit()
 
     for stmt in [
@@ -949,6 +1128,7 @@ def limpar_todos_dados():
     conn.execute("DELETE FROM execucao")
     conn.execute("DELETE FROM sub_elementos")
     conn.execute("DELETE FROM anexo_v")
+    conn.execute("DELETE FROM restos_a_pagar")
     try:
         conn.execute("DELETE FROM despesas")
     except Exception:
@@ -971,7 +1151,8 @@ with st.sidebar:
             "Orcamento (FIP 616)",
             "Execucao (FIP 613)",
             "Sub-elemento (FIP 701)",
-            "Repasses Recebidos (ANEXO V)"
+            "Repasses Recebidos (ANEXO V)",
+            "Restos a Pagar (FIP 226)"
         ]
     )
     arquivo = st.file_uploader("Arquivo Excel", type=["xlsx"])
@@ -1282,6 +1463,64 @@ with st.sidebar:
                     + "Total R$ {:,.2f}".format(total_av)
                 )
 
+            # ----------------------------------------------------------------
+            # RESTOS A PAGAR (FIP 226)
+            # Estrutura: 7 linhas de cabeçalho (0-5 metadata, 6 = nomes colunas)
+            # 15 colunas: credor, nome, empenho, data, dotacao,
+            #             proc_ins, proc_pag, proc_can, proc_apa,
+            #             np_ins, np_pag, np_can, np_apa, np_eliq, np_aliq
+            # ----------------------------------------------------------------
+            elif tipo_dado == "Restos a Pagar (FIP 226)":
+                df226 = pd.read_excel(arquivo, skiprows=6, header=0)
+                dados_rp = []
+                for _, row in df226.iterrows():
+                    try:
+                        cod_cred = str(row.iloc[0]).strip()
+                        if (not cod_cred or cod_cred in ("nan", "", "_")
+                                or cod_cred.upper().startswith("TOTAL")
+                                or "CREDOR" in cod_cred.upper()):
+                            continue
+                        nome_cred = str(row.iloc[1]).strip().replace("\xa0", " ")
+                        num_emp   = str(row.iloc[2]).strip()
+                        data_emp  = str(row.iloc[3]).strip()
+                        dotacao   = str(row.iloc[4]).strip()
+                        proc_ins  = limpar_f(row.iloc[5])
+                        proc_pag  = limpar_f(row.iloc[6])
+                        proc_can  = limpar_f(row.iloc[7])
+                        proc_apa  = limpar_f(row.iloc[8])
+                        np_ins    = limpar_f(row.iloc[9])
+                        np_pag    = limpar_f(row.iloc[10])
+                        np_can    = limpar_f(row.iloc[11])
+                        np_apa    = limpar_f(row.iloc[12])
+                        np_eliq   = limpar_f(row.iloc[13])
+                        np_aliq   = limpar_f(row.iloc[14])
+                        if all(v == 0.0 for v in [proc_ins, proc_pag, proc_can, proc_apa,
+                                                   np_ins, np_pag, np_can, np_apa, np_eliq, np_aliq]):
+                            continue
+                        dados_rp.append((
+                            m_final, 2026,
+                            cod_cred, nome_cred, num_emp, data_emp, dotacao,
+                            proc_ins, proc_pag, proc_can, proc_apa,
+                            np_ins, np_pag, np_can, np_apa, np_eliq, np_aliq
+                        ))
+                    except Exception:
+                        continue
+                conn.execute(
+                    "DELETE FROM restos_a_pagar WHERE ano=2026 AND mes=?", (m_final,)
+                )
+                conn.executemany(
+                    "INSERT INTO restos_a_pagar VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    dados_rp
+                )
+                conn.commit()
+                tot_ins_rp = sum(r[7] + r[11] for r in dados_rp)
+                tot_pag_rp = sum(r[8] + r[12] for r in dados_rp)
+                st.success(
+                    "Restos a Pagar " + MESES_NOMES[m_final - 1] + "/2026: "
+                    + str(len(dados_rp)) + " empenhos | "
+                    + "Inscrito R$ {:,.2f} | Pagos R$ {:,.2f}".format(tot_ins_rp, tot_pag_rp)
+                )
+
             conn.close()
 
         except Exception as e:
@@ -1293,11 +1532,12 @@ with st.sidebar:
     st.subheader("Backup Completo")
     conn_b = sqlite3.connect(DB_NAME)
     tbls = {
-        "receitas":      pd.read_sql("SELECT * FROM receitas",      conn_b),
-        "orcamento":     pd.read_sql("SELECT * FROM orcamento",     conn_b),
-        "execucao":      pd.read_sql("SELECT * FROM execucao",      conn_b),
-        "sub_elementos": pd.read_sql("SELECT * FROM sub_elementos", conn_b),
-        "anexo_v":       pd.read_sql("SELECT * FROM anexo_v",       conn_b),
+        "receitas":        pd.read_sql("SELECT * FROM receitas",        conn_b),
+        "orcamento":       pd.read_sql("SELECT * FROM orcamento",       conn_b),
+        "execucao":        pd.read_sql("SELECT * FROM execucao",        conn_b),
+        "sub_elementos":   pd.read_sql("SELECT * FROM sub_elementos",   conn_b),
+        "anexo_v":         pd.read_sql("SELECT * FROM anexo_v",         conn_b),
+        "restos_a_pagar":  pd.read_sql("SELECT * FROM restos_a_pagar",  conn_b),
     }
     conn_b.close()
     for nome_tab, df_tab in tbls.items():
@@ -1312,7 +1552,7 @@ with st.sidebar:
     st.caption("Restaurar tabela (CSV do backup):")
     tabela_rest = st.selectbox(
         "Tabela a restaurar:",
-        ["receitas", "orcamento", "execucao", "sub_elementos", "anexo_v"],
+        ["receitas", "orcamento", "execucao", "sub_elementos", "anexo_v", "restos_a_pagar"],
         key="tabela_rest"
     )
     file_restore = st.file_uploader("Arquivo CSV", type=["csv"], key="file_rest")
@@ -1340,14 +1580,15 @@ with st.sidebar:
 # CARGA PRINCIPAL
 # ---------------------------------------------------------------------------
 conn_main = sqlite3.connect(DB_NAME)
-df_rec    = pd.read_sql("SELECT * FROM receitas",      conn_main)
-df_orc    = pd.read_sql("SELECT * FROM orcamento",     conn_main)
-df_exec   = pd.read_sql("SELECT * FROM execucao",      conn_main)
-df_sub    = pd.read_sql("SELECT * FROM sub_elementos", conn_main)
-df_anexov = pd.read_sql("SELECT * FROM anexo_v",       conn_main)
+df_rec    = pd.read_sql("SELECT * FROM receitas",        conn_main)
+df_orc    = pd.read_sql("SELECT * FROM orcamento",       conn_main)
+df_exec   = pd.read_sql("SELECT * FROM execucao",        conn_main)
+df_sub    = pd.read_sql("SELECT * FROM sub_elementos",   conn_main)
+df_anexov = pd.read_sql("SELECT * FROM anexo_v",         conn_main)
+df_rp     = pd.read_sql("SELECT * FROM restos_a_pagar",  conn_main)
 conn_main.close()
 
-tab1, tab2, tab3, tab4 = st.tabs(["Receitas", "Despesas", "Comparativo", "Relatorios LRF"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Receitas", "Despesas", "Comparativo", "Relatorios LRF", "Restos a Pagar"])
 
 
 # ---------------------------------------------------------------------------
@@ -2082,3 +2323,265 @@ with tab4:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="lrf2"
         )
+
+        if not df_rp.empty:
+            st.divider()
+            c4, _, _ = st.columns(3)
+            c4.write("**Anexo RP — Restos a Pagar**")
+            c4.caption("Inscrito x Pagos x Cancelados x A Liquidar x Liquidados (FIP 226)")
+            c4.download_button(
+                "Baixar Anexo RP (.xlsx)",
+                data=gerar_excel_rp(df_rp, meses_bim, meses_ate_agora),
+                file_name="AnexoRP_LRF.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="lrf_rp"
+            )
+
+
+# ---------------------------------------------------------------------------
+# ABA 5: RESTOS A PAGAR
+# ---------------------------------------------------------------------------
+with tab5:
+    st.subheader("Restos a Pagar — FIP 226")
+    if df_rp.empty:
+        st.info("Importe arquivos FIP 226 (Restos a Pagar) pela barra lateral para visualizar.")
+    else:
+        meses_rp_disp = sorted(df_rp["mes"].unique())
+
+        f1, f2 = st.columns([2, 2])
+        ms_rp = f1.multiselect(
+            "Mês de referência:",
+            meses_rp_disp,
+            default=[max(meses_rp_disp)],
+            format_func=lambda x: MESES_NOMES[x - 1],
+            key="ms_rp"
+        )
+        tipo_rp = f2.radio(
+            "Visualizar por:",
+            ["Resumo Geral", "Por Credor", "Por Dotação"],
+            horizontal=True,
+            key="tipo_rp"
+        )
+
+        if not ms_rp:
+            st.warning("Selecione ao menos um mês.")
+        else:
+            mes_ref_rp = max(ms_rp)
+            df_rp_ref = df_rp[df_rp["mes"] == mes_ref_rp].copy()
+
+            # ---- Cálculos de totais ----------------------------------------
+            proc_ins = float(df_rp_ref["proc_inscrito"].sum())
+            proc_pag = float(df_rp_ref["proc_pagos"].sum())
+            proc_can = float(df_rp_ref["proc_cancelados"].sum())
+            proc_apa = float(df_rp_ref["proc_a_pagar"].sum())
+            np_ins   = float(df_rp_ref["np_inscrito"].sum())
+            np_pag   = float(df_rp_ref["np_pagos"].sum())
+            np_can   = float(df_rp_ref["np_cancelados"].sum())
+            np_aliq  = float(df_rp_ref["np_a_liquidar"].sum())
+
+            tot_inscrito  = proc_ins + np_ins
+            tot_pagos     = proc_pag + np_pag
+            tot_cancelados = proc_can + np_can
+            tot_a_liquidar = proc_apa + np_aliq
+            tot_liquidados = max(0.0, tot_inscrito - tot_a_liquidar - tot_cancelados)
+            pct_pago = tot_pagos / tot_inscrito * 100 if tot_inscrito > 0 else 0
+
+            # ---- KPIs -------------------------------------------------------
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("Total Inscrito",     "R$ {:,.2f}".format(tot_inscrito))
+            k2.metric("Liquidados",         "R$ {:,.2f}".format(tot_liquidados))
+            k3.metric("Pagos (acum.)",      "R$ {:,.2f}".format(tot_pagos))
+            k4.metric("Cancelados",         "R$ {:,.2f}".format(tot_cancelados))
+            k5.metric("A Liquidar / A Pagar","R$ {:,.2f}".format(tot_a_liquidar))
+
+            st.caption(
+                "Referência: **{}** | Pago = **{:.1f}%** do Inscrito | "
+                "Liquidados = Inscrito − A Liquidar − Cancelados".format(
+                    MESES_NOMES[mes_ref_rp - 1], pct_pago
+                )
+            )
+            st.divider()
+
+            # ---- Gráfico: evolução mensal -----------------------------------
+            if len(meses_rp_disp) > 1:
+                st.markdown("#### Evolução Mensal")
+                evo = []
+                for m in meses_rp_disp:
+                    dm = df_rp[df_rp["mes"] == m]
+                    ins_m  = float((dm["proc_inscrito"] + dm["np_inscrito"]).sum())
+                    pag_m  = float((dm["proc_pagos"]    + dm["np_pagos"]).sum())
+                    can_m  = float((dm["proc_cancelados"] + dm["np_cancelados"]).sum())
+                    aliq_m = float((dm["proc_a_pagar"]  + dm["np_a_liquidar"]).sum())
+                    liq_m  = max(0.0, ins_m - aliq_m - can_m)
+                    evo.append({"mes": m, "inscrito": ins_m, "pagos": pag_m,
+                                "cancelados": can_m, "a_liquidar": aliq_m,
+                                "liquidados": liq_m})
+                df_evo = pd.DataFrame(evo)
+                labels_evo = [MESES_NOMES[m - 1] for m in df_evo["mes"]]
+
+                fig_evo = go.Figure()
+                fig_evo.add_trace(go.Bar(
+                    name="Inscrito", x=labels_evo, y=df_evo["inscrito"],
+                    marker_color=COR_AZUL, opacity=0.7))
+                fig_evo.add_trace(go.Bar(
+                    name="Liquidados", x=labels_evo, y=df_evo["liquidados"],
+                    marker_color=COR_VERDE, opacity=0.85))
+                fig_evo.add_trace(go.Bar(
+                    name="Pagos", x=labels_evo, y=df_evo["pagos"],
+                    marker_color="#43A047", opacity=0.9))
+                fig_evo.add_trace(go.Bar(
+                    name="Cancelados", x=labels_evo, y=df_evo["cancelados"],
+                    marker_color=COR_LARAN, opacity=0.85))
+                fig_evo.add_trace(go.Bar(
+                    name="A Liquidar", x=labels_evo, y=df_evo["a_liquidar"],
+                    marker_color="#78909C", opacity=0.85))
+                fig_evo.update_layout(
+                    barmode="group", height=380,
+                    margin=dict(l=0, r=0, t=30, b=0),
+                    legend=dict(orientation="h", y=-0.15),
+                    yaxis=dict(tickformat=",.0f")
+                )
+                st.plotly_chart(fig_evo, use_container_width=True)
+                st.divider()
+
+            # ---- Gráfico: Processados vs Não Processados -------------------
+            st.markdown("#### Processados vs Não Processados")
+            col_g1, col_g2 = st.columns(2)
+            fig_tipos = go.Figure()
+            fig_tipos.add_trace(go.Bar(
+                name="Processados",
+                x=["Inscrito", "Pagos", "Cancelados", "A Pagar"],
+                y=[proc_ins, proc_pag, proc_can, proc_apa],
+                marker_color=COR_AZUL))
+            fig_tipos.add_trace(go.Bar(
+                name="Não Processados",
+                x=["Inscrito", "Pagos", "Cancelados", "A Liquidar"],
+                y=[np_ins, np_pag, np_can, np_aliq],
+                marker_color=COR_VERDE))
+            fig_tipos.update_layout(
+                barmode="group", height=350,
+                margin=dict(l=0, r=0, t=30, b=0),
+                yaxis=dict(tickformat=",.0f")
+            )
+            col_g1.plotly_chart(fig_tipos, use_container_width=True)
+
+            # Pizza: composição do inscrito
+            fig_pizza = go.Figure(go.Pie(
+                labels=["Processados", "Não Processados"],
+                values=[proc_ins, np_ins],
+                hole=0.4,
+                marker_colors=[COR_AZUL, COR_VERDE]
+            ))
+            fig_pizza.update_layout(
+                height=350, margin=dict(l=0, r=0, t=30, b=0),
+                title_text="Composição do Inscrito"
+            )
+            col_g2.plotly_chart(fig_pizza, use_container_width=True)
+
+            st.divider()
+
+            # ---- Tabela detalhada ------------------------------------------
+            if tipo_rp == "Por Credor":
+                st.markdown("#### Por Credor")
+                df_cred_tab = (df_rp_ref
+                    .assign(
+                        inscrito=df_rp_ref["proc_inscrito"] + df_rp_ref["np_inscrito"],
+                        pagos=df_rp_ref["proc_pagos"] + df_rp_ref["np_pagos"],
+                        cancelados=df_rp_ref["proc_cancelados"] + df_rp_ref["np_cancelados"],
+                        a_liquidar=df_rp_ref["proc_a_pagar"] + df_rp_ref["np_a_liquidar"],
+                    )
+                    .groupby("nome_credor", as_index=False)
+                    .agg({"inscrito": "sum", "pagos": "sum", "cancelados": "sum", "a_liquidar": "sum"})
+                    .sort_values("inscrito", ascending=False)
+                )
+                df_cred_tab["liquidados"] = (df_cred_tab["inscrito"]
+                    - df_cred_tab["a_liquidar"] - df_cred_tab["cancelados"]).clip(lower=0)
+                pct_tot = df_cred_tab["inscrito"].sum()
+                df_cred_tab["% Inscrito"] = df_cred_tab["inscrito"].apply(
+                    lambda v: "{:.1f}%".format(v / pct_tot * 100) if pct_tot > 0 else "0.0%")
+                for col in ["inscrito", "pagos", "cancelados", "a_liquidar", "liquidados"]:
+                    df_cred_tab[col] = df_cred_tab[col].apply(lambda v: "R$ {:,.2f}".format(v))
+                df_cred_tab.rename(columns={
+                    "nome_credor": "Credor", "inscrito": "Inscrito",
+                    "pagos": "Pagos", "cancelados": "Cancelados",
+                    "a_liquidar": "A Liquidar", "liquidados": "Liquidados"
+                }, inplace=True)
+                st.dataframe(df_cred_tab, use_container_width=True, hide_index=True)
+
+            elif tipo_rp == "Por Dotação":
+                st.markdown("#### Por Dotação Orçamentária")
+                df_dot_tab = (df_rp_ref
+                    .assign(
+                        inscrito=df_rp_ref["proc_inscrito"] + df_rp_ref["np_inscrito"],
+                        pagos=df_rp_ref["proc_pagos"] + df_rp_ref["np_pagos"],
+                        cancelados=df_rp_ref["proc_cancelados"] + df_rp_ref["np_cancelados"],
+                        a_liquidar=df_rp_ref["proc_a_pagar"] + df_rp_ref["np_a_liquidar"],
+                    )
+                    .groupby("dotacao", as_index=False)
+                    .agg({"inscrito": "sum", "pagos": "sum", "cancelados": "sum", "a_liquidar": "sum"})
+                    .sort_values("inscrito", ascending=False)
+                )
+                df_dot_tab["liquidados"] = (df_dot_tab["inscrito"]
+                    - df_dot_tab["a_liquidar"] - df_dot_tab["cancelados"]).clip(lower=0)
+                for col in ["inscrito", "pagos", "cancelados", "a_liquidar", "liquidados"]:
+                    df_dot_tab[col] = df_dot_tab[col].apply(lambda v: "R$ {:,.2f}".format(v))
+                df_dot_tab.rename(columns={
+                    "dotacao": "Dotação", "inscrito": "Inscrito",
+                    "pagos": "Pagos", "cancelados": "Cancelados",
+                    "a_liquidar": "A Liquidar", "liquidados": "Liquidados"
+                }, inplace=True)
+                st.dataframe(df_dot_tab, use_container_width=True, hide_index=True)
+
+            else:
+                st.markdown("#### Resumo Geral")
+                resumo = pd.DataFrame([
+                    {"Tipo": "Processados",     "Inscrito": proc_ins, "Pagos": proc_pag,
+                     "Cancelados": proc_can, "A Liquidar / A Pagar": proc_apa,
+                     "Liquidados": max(0.0, proc_ins - proc_apa - proc_can)},
+                    {"Tipo": "Não Processados", "Inscrito": np_ins,   "Pagos": np_pag,
+                     "Cancelados": np_can, "A Liquidar / A Pagar": np_aliq,
+                     "Liquidados": max(0.0, np_ins - np_aliq - np_can)},
+                    {"Tipo": "TOTAL",           "Inscrito": tot_inscrito, "Pagos": tot_pagos,
+                     "Cancelados": tot_cancelados, "A Liquidar / A Pagar": tot_a_liquidar,
+                     "Liquidados": tot_liquidados},
+                ])
+                for col in ["Inscrito", "Pagos", "Cancelados", "A Liquidar / A Pagar", "Liquidados"]:
+                    resumo[col] = resumo[col].apply(lambda v: "R$ {:,.2f}".format(v))
+                st.dataframe(resumo, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # ---- Tabela de empenhos ----------------------------------------
+            with st.expander("Ver todos os empenhos"):
+                df_det = df_rp_ref[["num_empenho", "nome_credor", "dotacao",
+                                    "proc_inscrito", "np_inscrito",
+                                    "proc_pagos", "np_pagos",
+                                    "proc_cancelados", "np_cancelados",
+                                    "proc_a_pagar", "np_a_liquidar"]].copy()
+                df_det["Inscrito"] = df_det["proc_inscrito"] + df_det["np_inscrito"]
+                df_det["Pagos"]    = df_det["proc_pagos"]    + df_det["np_pagos"]
+                df_det["Cancelados"] = df_det["proc_cancelados"] + df_det["np_cancelados"]
+                df_det["A Liquidar"] = df_det["proc_a_pagar"] + df_det["np_a_liquidar"]
+                df_det["Liquidados"] = (df_det["Inscrito"] - df_det["A Liquidar"] - df_det["Cancelados"]).clip(lower=0)
+                df_det = df_det[["num_empenho", "nome_credor", "dotacao",
+                                 "Inscrito", "Pagos", "Cancelados", "A Liquidar", "Liquidados"]]
+                df_det.rename(columns={
+                    "num_empenho": "Empenho", "nome_credor": "Credor", "dotacao": "Dotação"
+                }, inplace=True)
+                df_det = df_det.sort_values("Inscrito", ascending=False)
+                for col in ["Inscrito", "Pagos", "Cancelados", "A Liquidar", "Liquidados"]:
+                    df_det[col] = df_det[col].apply(lambda v: "R$ {:,.2f}".format(v))
+                st.dataframe(df_det, use_container_width=True, hide_index=True)
+
+            # ---- Exportar PDF ----------------------------------------------
+            try:
+                pdf_rp = gerar_pdf_rp(df_rp_ref, mes_ref_rp, ms_rp)
+                st.download_button(
+                    "📄 Exportar Relatório PDF — Restos a Pagar",
+                    data=pdf_rp,
+                    file_name="relatorio_restos_a_pagar.pdf",
+                    mime="application/pdf",
+                    key="pdf_rp"
+                )
+            except Exception as e:
+                st.warning("PDF indisponível: " + str(e))
