@@ -2348,15 +2348,21 @@ with tab5:
     else:
         meses_rp_disp = sorted(df_rp["mes"].unique())
 
-        f1, f2 = st.columns([2, 2])
-        ms_rp = f1.multiselect(
+        fc1, fc2, fc3 = st.columns([2, 2, 2])
+        ms_rp = fc1.multiselect(
             "Mês de referência:",
             meses_rp_disp,
             default=[max(meses_rp_disp)],
             format_func=lambda x: MESES_NOMES[x - 1],
             key="ms_rp"
         )
-        tipo_rp = f2.radio(
+        tipo_proc = fc2.radio(
+            "Tipo de RP:",
+            ["Todos", "Processados", "Não Processados"],
+            horizontal=True,
+            key="tipo_proc_rp"
+        )
+        tipo_rp = fc3.radio(
             "Visualizar por:",
             ["Resumo Geral", "Por Credor", "Por Dotação"],
             horizontal=True,
@@ -2370,36 +2376,64 @@ with tab5:
             df_rp_ref = df_rp[df_rp["mes"] == mes_ref_rp].copy()
 
             # ---- Cálculos de totais ----------------------------------------
-            proc_ins = float(df_rp_ref["proc_inscrito"].sum())
-            proc_pag = float(df_rp_ref["proc_pagos"].sum())
-            proc_can = float(df_rp_ref["proc_cancelados"].sum())
-            proc_apa = float(df_rp_ref["proc_a_pagar"].sum())
-            np_ins   = float(df_rp_ref["np_inscrito"].sum())
-            np_pag   = float(df_rp_ref["np_pagos"].sum())
-            np_can   = float(df_rp_ref["np_cancelados"].sum())
-            np_aliq  = float(df_rp_ref["np_a_liquidar"].sum())
+            proc_ins  = float(df_rp_ref["proc_inscrito"].sum())
+            proc_pag  = float(df_rp_ref["proc_pagos"].sum())
+            proc_can  = float(df_rp_ref["proc_cancelados"].sum())
+            proc_apa  = float(df_rp_ref["proc_a_pagar"].sum())
+            np_ins    = float(df_rp_ref["np_inscrito"].sum())
+            np_pag    = float(df_rp_ref["np_pagos"].sum())
+            np_can    = float(df_rp_ref["np_cancelados"].sum())
+            np_apa    = float(df_rp_ref["np_a_pagar"].sum())
+            np_eliq   = float(df_rp_ref["np_em_liquidacao"].sum())
+            np_aliq   = float(df_rp_ref["np_a_liquidar"].sum())
 
-            tot_inscrito  = proc_ins + np_ins
-            tot_pagos     = proc_pag + np_pag
-            tot_cancelados = proc_can + np_can
-            tot_a_liquidar = proc_apa + np_aliq
-            tot_liquidados = max(0.0, tot_inscrito - tot_a_liquidar - tot_cancelados)
+            # Liquidados NP = inscritos - a_liquidar - cancelados (fórmula do usuário)
+            # = np_pag + np_apa + np_eliq (equivalente pela equação de balanço do FIP)
+            np_liquidados = max(0.0, np_ins - np_aliq - np_can)
+            # Processados: todos são liquidados por definição (inscrito = pag + can + a_pagar)
+            proc_liquidados = proc_ins  # todos já foram liquidados ao ser inscrito
+
+            if tipo_proc == "Processados":
+                tot_inscrito   = proc_ins
+                tot_pagos      = proc_pag
+                tot_cancelados = proc_can
+                tot_a_liquidar = proc_apa     # proc: "a liquidar" = a pagar
+                tot_liquidados = proc_liquidados
+            elif tipo_proc == "Não Processados":
+                tot_inscrito   = np_ins
+                tot_pagos      = np_pag
+                tot_cancelados = np_can
+                tot_a_liquidar = np_aliq
+                tot_liquidados = np_liquidados
+            else:
+                tot_inscrito   = proc_ins + np_ins
+                tot_pagos      = proc_pag + np_pag
+                tot_cancelados = proc_can + np_can
+                tot_a_liquidar = np_aliq      # só NP tem "a liquidar"; proc tem "a pagar"
+                tot_liquidados = np_liquidados # liquidados = conceito NP (proc já são todos liquidados)
+
             pct_pago = tot_pagos / tot_inscrito * 100 if tot_inscrito > 0 else 0
 
             # ---- KPIs -------------------------------------------------------
             k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("Total Inscrito",     "R$ {:,.2f}".format(tot_inscrito))
-            k2.metric("Liquidados",         "R$ {:,.2f}".format(tot_liquidados))
-            k3.metric("Pagos (acum.)",      "R$ {:,.2f}".format(tot_pagos))
-            k4.metric("Cancelados",         "R$ {:,.2f}".format(tot_cancelados))
-            k5.metric("A Liquidar / A Pagar","R$ {:,.2f}".format(tot_a_liquidar))
+            k1.metric("Inscrito",        "R$ {:,.2f}".format(tot_inscrito))
+            k2.metric("NP Liquidados",   "R$ {:,.2f}".format(tot_liquidados))
+            k3.metric("Pagos (acum.)",   "R$ {:,.2f}".format(tot_pagos))
+            k4.metric("Cancelados",      "R$ {:,.2f}".format(tot_cancelados))
+            k5.metric("NP A Liquidar",   "R$ {:,.2f}".format(tot_a_liquidar))
 
             st.caption(
-                "Referência: **{}** | Pago = **{:.1f}%** do Inscrito | "
-                "Liquidados = Inscrito − A Liquidar − Cancelados".format(
-                    MESES_NOMES[mes_ref_rp - 1], pct_pago
+                "Referência: **{}** | Filtro: **{}** | Pago = **{:.1f}%** do Inscrito | "
+                "NP Liquidados = np_inscrito − np_a_liquidar − np_cancelados".format(
+                    MESES_NOMES[mes_ref_rp - 1], tipo_proc, pct_pago
                 )
             )
+            if tipo_proc == "Todos":
+                st.info(
+                    "Proc. A Pagar (liquidados aguardando pagamento): **R$ {:,.2f}**  |  "
+                    "NP A Pagar (liquidados em trânsito): **R$ {:,.2f}**  |  "
+                    "NP Em Liquidação: **R$ {:,.2f}**".format(proc_apa, np_apa, np_eliq)
+                )
             st.divider()
 
             # ---- Gráfico: evolução mensal -----------------------------------
@@ -2408,11 +2442,27 @@ with tab5:
                 evo = []
                 for m in meses_rp_disp:
                     dm = df_rp[df_rp["mes"] == m]
-                    ins_m  = float((dm["proc_inscrito"] + dm["np_inscrito"]).sum())
-                    pag_m  = float((dm["proc_pagos"]    + dm["np_pagos"]).sum())
-                    can_m  = float((dm["proc_cancelados"] + dm["np_cancelados"]).sum())
-                    aliq_m = float((dm["proc_a_pagar"]  + dm["np_a_liquidar"]).sum())
-                    liq_m  = max(0.0, ins_m - aliq_m - can_m)
+                    if tipo_proc == "Processados":
+                        ins_m  = float(dm["proc_inscrito"].sum())
+                        pag_m  = float(dm["proc_pagos"].sum())
+                        can_m  = float(dm["proc_cancelados"].sum())
+                        aliq_m = float(dm["proc_a_pagar"].sum())
+                        liq_m  = ins_m
+                    elif tipo_proc == "Não Processados":
+                        ins_m  = float(dm["np_inscrito"].sum())
+                        pag_m  = float(dm["np_pagos"].sum())
+                        can_m  = float(dm["np_cancelados"].sum())
+                        aliq_m = float(dm["np_a_liquidar"].sum())
+                        liq_m  = max(0.0, ins_m - aliq_m - can_m)
+                    else:
+                        ins_m  = float((dm["proc_inscrito"] + dm["np_inscrito"]).sum())
+                        pag_m  = float((dm["proc_pagos"]    + dm["np_pagos"]).sum())
+                        can_m  = float((dm["proc_cancelados"] + dm["np_cancelados"]).sum())
+                        np_ins_m = float(dm["np_inscrito"].sum())
+                        np_aliq_m = float(dm["np_a_liquidar"].sum())
+                        np_can_m  = float(dm["np_cancelados"].sum())
+                        aliq_m = float(dm["np_a_liquidar"].sum())
+                        liq_m  = max(0.0, np_ins_m - np_aliq_m - np_can_m)
                     evo.append({"mes": m, "inscrito": ins_m, "pagos": pag_m,
                                 "cancelados": can_m, "a_liquidar": aliq_m,
                                 "liquidados": liq_m})
