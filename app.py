@@ -976,20 +976,33 @@ def gerar_pdf_rp(df_rp_ref, mes_ref, meses_selecionados):
 
 
 def gerar_excel_rp(df_rp, meses_bim, meses_ate_agora):
-    """Gera Anexo RP no formato LRF Anexo VII por fonte de recurso."""
+    """Gera Anexo RP no formato LRF Anexo VII por fonte, com split exerc.ant./(b)."""
     def extrair_fonte(dotacao):
         try:
             partes = str(dotacao).split(".")
+            # Penúltima parte da dotação = FONTE (ex: ...1.176.0000 → "176")
             return partes[-2].strip() if len(partes) >= 2 else "N/D"
         except Exception:
             return "N/D"
+
+    def extrair_ano_emp(empenho):
+        try:
+            # Empenho: "03601.0001.23.006821-7" → 3º segmento = ano (2 dígitos)
+            return int(str(empenho).split(".")[2])
+        except Exception:
+            return 0
 
     mes_ref = max(m for m in df_rp["mes"].unique() if m in meses_ate_agora) if not df_rp.empty else None
     if mes_ref is None:
         return io.BytesIO().getvalue()
 
+    # Ano do exercício anterior em 2 dígitos (ex: 2026 → 25)
+    ano_ref = int(df_rp["ano"].max()) if "ano" in df_rp.columns and not df_rp["ano"].isnull().all() else 2026
+    ano_ant_2d = (ano_ref - 1) % 100
+
     df_ref = df_rp[df_rp["mes"] == mes_ref].copy()
-    df_ref["fonte"] = df_ref["dotacao"].apply(extrair_fonte)
+    df_ref["fonte"]   = df_ref["dotacao"].apply(extrair_fonte)
+    df_ref["ano_emp"] = df_ref["num_empenho"].apply(extrair_ano_emp)
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -998,7 +1011,7 @@ def gerar_excel_rp(df_rp, meses_bim, meses_ate_agora):
         writer.sheets["RP_LRF"] = ws
         f = criar_formatos_excel(workbook)
 
-        ws.set_column(0, 0, 32)
+        ws.set_column(0, 0, 34)
         ws.set_column(1, 12, 15)
 
         # ---- Linha 0: super-cabeçalhos ----------------------------------
@@ -1028,21 +1041,26 @@ def gerar_excel_rp(df_rp, meses_bim, meses_ate_agora):
             return float(df[col].sum()) if not df.empty and col in df.columns else 0.0
 
         def calcular_linha(df_fonte):
-            pi = soma(df_fonte, "proc_inscrito")
-            pp = soma(df_fonte, "proc_pagos")
-            pc = soma(df_fonte, "proc_cancelados")
-            pa = soma(df_fonte, "proc_a_pagar")
-            ni = soma(df_fonte, "np_inscrito")
+            # Split inscrito por ano do empenho
+            df_ant   = df_fonte[df_fonte["ano_emp"] < ano_ant_2d]   # exerc. anteriores
+            df_31dez = df_fonte[df_fonte["ano_emp"] >= ano_ant_2d]  # 31/12 exerc.ant.
+            proc_a = soma(df_ant,   "proc_inscrito")   # (a)
+            proc_b = soma(df_31dez, "proc_inscrito")   # (b)
+            np_f   = soma(df_ant,   "np_inscrito")     # (f)
+            np_g   = soma(df_31dez, "np_inscrito")     # (g)
+            # Pagos, cancelados e saldos — totais do grupo
+            pp  = soma(df_fonte, "proc_pagos")
+            pc  = soma(df_fonte, "proc_cancelados")
+            pa  = soma(df_fonte, "proc_a_pagar")
             np_ = soma(df_fonte, "np_pagos")
-            nc = soma(df_fonte, "np_cancelados")
-            na = soma(df_fonte, "np_a_liquidar")
-            saldo_proc = pa                              # e = pi - pp - pc
-            liq_np = max(0.0, ni - na - nc)             # h: liquidados NP
-            saldo_np = max(0.0, ni - np_ - nc)          # k = f+g - i - j
-            saldo_total = saldo_proc + saldo_np
-            # (a) e (f) = inscrito exerc.anteriores; não disponível em FIP Mvt=Todas
-            # (b) e (g) = inscrito 31/12 exerc.ant.; alocamos o total em (b)/(g)
-            return (0.0, pi, pp, pc, saldo_proc, 0.0, ni, liq_np, np_, nc, saldo_np, saldo_total)
+            nc  = soma(df_fonte, "np_cancelados")
+            na  = soma(df_fonte, "np_a_liquidar")
+            ni  = np_f + np_g
+            saldo_proc = pa                         # e = (a+b) - c - d
+            liq_np     = max(0.0, ni - na - nc)     # h: NP liquidados
+            saldo_np   = max(0.0, ni - np_ - nc)    # k = (f+g) - i - j
+            return (proc_a, proc_b, pp, pc, saldo_proc,
+                    np_f, np_g, liq_np, np_, nc, saldo_np, saldo_proc + saldo_np)
 
         fontes = sorted(df_ref["fonte"].unique())
         row = 3
@@ -1051,7 +1069,7 @@ def gerar_excel_rp(df_rp, meses_bim, meses_ate_agora):
         for fonte in fontes:
             df_f = df_ref[df_ref["fonte"] == fonte]
             vals = calcular_linha(df_f)
-            ws.write(row, 0, "TJMT/" + fonte, f["fmt_group"])
+            ws.write(row, 0, "JUDICIÁRIO/TJMT/" + fonte, f["fmt_group"])
             for c, v in enumerate(vals, 1):
                 ws.write_number(row, c, v, f["fmt_money"])
                 tot[c - 1] += v
