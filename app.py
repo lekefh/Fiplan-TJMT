@@ -229,6 +229,10 @@ def preparar_base_funcional_lrf(df_orc, df_exec, meses_bim, meses_ate_agora):
     else:
         df_bim = pd.DataFrame(columns=["funcao", "subfuncao", "emp_no_bim", "liq_no_bim"])
         df_ate = pd.DataFrame(columns=["funcao", "subfuncao", "emp_ate", "liq_ate"])
+    for df_ in [df_last, df_bim, df_ate]:
+        for col in ["funcao", "subfuncao"]:
+            if col in df_.columns:
+                df_[col] = df_[col].astype(str)
     return df_last.merge(df_bim, on=["funcao", "subfuncao"], how="outer").merge(df_ate, on=["funcao", "subfuncao"], how="outer").fillna(0)
 
 
@@ -972,80 +976,93 @@ def gerar_pdf_rp(df_rp_ref, mes_ref, meses_selecionados):
 
 
 def gerar_excel_rp(df_rp, meses_bim, meses_ate_agora):
-    """Gera planilha LRF de Restos a Pagar."""
+    """Gera Anexo RP no formato LRF Anexo VII por fonte de recurso."""
+    def extrair_fonte(dotacao):
+        try:
+            partes = str(dotacao).split(".")
+            return partes[-2].strip() if len(partes) >= 2 else "N/D"
+        except Exception:
+            return "N/D"
+
     mes_ref = max(m for m in df_rp["mes"].unique() if m in meses_ate_agora) if not df_rp.empty else None
     if mes_ref is None:
         return io.BytesIO().getvalue()
-    df_ref = df_rp[df_rp["mes"] == mes_ref]
-    df_bim = df_rp[df_rp["mes"].isin(meses_bim)] if not df_rp.empty else pd.DataFrame()
 
-    periodo = periodo_bimestre_extenso(meses_bim)
+    df_ref = df_rp[df_rp["mes"] == mes_ref].copy()
+    df_ref["fonte"] = df_ref["dotacao"].apply(extrair_fonte)
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         workbook = writer.book
         ws = workbook.add_worksheet("RP_LRF")
         writer.sheets["RP_LRF"] = ws
         f = criar_formatos_excel(workbook)
-        ws.set_column("A:A", 36)
-        ws.set_column("B:F", 18)
 
-        # Cabeçalho
-        ws.merge_range(0, 0, 1, 0, "RESTOS A PAGAR", f["fmt_header"])
-        ws.merge_range(0, 1, 1, 1, "INSCRITO\n(R$)", f["fmt_header"])
-        ws.merge_range(0, 2, 1, 2, "PAGOS\nNO BIMESTRE\n" + periodo, f["fmt_header"])
-        ws.merge_range(0, 3, 1, 3, "PAGOS\nATE O BIMESTRE", f["fmt_header"])
-        ws.merge_range(0, 4, 1, 4, "CANCELADOS\nATE O BIMESTRE", f["fmt_header"])
-        ws.merge_range(0, 5, 1, 5, "A LIQUIDAR /\nA PAGAR", f["fmt_header"])
-        ws.merge_range(0, 6, 1, 6, "LIQUIDADOS\n(Calculado)", f["fmt_header"])
+        ws.set_column(0, 0, 32)
+        ws.set_column(1, 12, 15)
 
-        def soma_rp(df, col):
+        # ---- Linha 0: super-cabeçalhos ----------------------------------
+        ws.merge_range(0, 0, 2, 0, "PODER/ÓRGÃO", f["fmt_header"])
+        ws.merge_range(0, 1, 0, 5, "RP PROCESSADOS", f["fmt_header"])
+        ws.merge_range(0, 6, 0, 11, "RP NÃO-PROCESSADOS", f["fmt_header"])
+        ws.merge_range(0, 12, 2, 12, "SALDO TOTAL\nL=(e+k)", f["fmt_header"])
+
+        # ---- Linha 1: sub-grupos ----------------------------------------
+        ws.merge_range(1, 1, 1, 2, "INSCRITOS", f["fmt_header"])
+        ws.merge_range(1, 3, 2, 3, "PAGOS\n(c)", f["fmt_header"])
+        ws.merge_range(1, 4, 2, 4, "CANCELADOS\n(d)", f["fmt_header"])
+        ws.merge_range(1, 5, 2, 5, "SALDO\ne=(a+b)-(c+d)", f["fmt_header"])
+        ws.merge_range(1, 6, 1, 7, "INSCRITOS", f["fmt_header"])
+        ws.merge_range(1, 8, 2, 8, "LIQUIDADOS\n(h)", f["fmt_header"])
+        ws.merge_range(1, 9, 2, 9, "PAGOS\n(i)", f["fmt_header"])
+        ws.merge_range(1, 10, 2, 10, "CANCELADOS\n(j)", f["fmt_header"])
+        ws.merge_range(1, 11, 2, 11, "SALDO\nk=(f+g)-(i+j)", f["fmt_header"])
+
+        # ---- Linha 2: sub-colunas de inscritos --------------------------
+        ws.write(2, 1, "EM EXERC.\nANTERIORES\n(a)", f["fmt_header"])
+        ws.write(2, 2, "EM 31/12\nEXERC.ANT.\n(b)", f["fmt_header"])
+        ws.write(2, 6, "EM EXERC.\nANTERIORES\n(f)", f["fmt_header"])
+        ws.write(2, 7, "EM 31/12\nEXERC.ANT.\n(g)", f["fmt_header"])
+
+        def soma(df, col):
             return float(df[col].sum()) if not df.empty and col in df.columns else 0.0
 
-        proc_ins_ref  = soma_rp(df_ref, "proc_inscrito")
-        proc_pag_ref  = soma_rp(df_ref, "proc_pagos")
-        proc_can_ref  = soma_rp(df_ref, "proc_cancelados")
-        proc_apa_ref  = soma_rp(df_ref, "proc_a_pagar")
-        np_ins_ref    = soma_rp(df_ref, "np_inscrito")
-        np_pag_ref    = soma_rp(df_ref, "np_pagos")
-        np_can_ref    = soma_rp(df_ref, "np_cancelados")
-        np_aliq_ref   = soma_rp(df_ref, "np_a_liquidar")
+        def calcular_linha(df_fonte):
+            pi = soma(df_fonte, "proc_inscrito")
+            pp = soma(df_fonte, "proc_pagos")
+            pc = soma(df_fonte, "proc_cancelados")
+            pa = soma(df_fonte, "proc_a_pagar")
+            ni = soma(df_fonte, "np_inscrito")
+            np_ = soma(df_fonte, "np_pagos")
+            nc = soma(df_fonte, "np_cancelados")
+            na = soma(df_fonte, "np_a_liquidar")
+            saldo_proc = pa                              # e = pi - pp - pc
+            liq_np = max(0.0, ni - na - nc)             # h: liquidados NP
+            saldo_np = max(0.0, ni - np_ - nc)          # k = f+g - i - j
+            saldo_total = saldo_proc + saldo_np
+            # (a) e (f) = inscrito exerc.anteriores; não disponível em FIP Mvt=Todas
+            # (b) e (g) = inscrito 31/12 exerc.ant.; alocamos o total em (b)/(g)
+            return (0.0, pi, pp, pc, saldo_proc, 0.0, ni, liq_np, np_, nc, saldo_np, saldo_total)
 
-        proc_pag_bim  = soma_rp(df_bim, "proc_pagos")
-        np_pag_bim    = soma_rp(df_bim, "np_pagos")
+        fontes = sorted(df_ref["fonte"].unique())
+        row = 3
+        tot = [0.0] * 12
 
-        linhas_xls = [
-            ("Processados",
-             proc_ins_ref, proc_pag_bim, proc_pag_ref, proc_can_ref,
-             proc_apa_ref, max(0.0, proc_ins_ref - proc_apa_ref - proc_can_ref),
-             "grupo"),
-            ("Nao Processados",
-             np_ins_ref, np_pag_bim, np_pag_ref, np_can_ref,
-             np_aliq_ref, max(0.0, np_ins_ref - np_aliq_ref - np_can_ref),
-             "grupo"),
-            ("TOTAL GERAL",
-             proc_ins_ref + np_ins_ref,
-             proc_pag_bim + np_pag_bim,
-             proc_pag_ref + np_pag_ref,
-             proc_can_ref + np_can_ref,
-             proc_apa_ref + np_aliq_ref,
-             max(0.0, (proc_ins_ref + np_ins_ref) - (proc_apa_ref + np_aliq_ref) - (proc_can_ref + np_can_ref)),
-             "total"),
-        ]
-
-        row = 2
-        for desc, ins, pag_bim, pag_ate, can_ate, aliq, liq, tipo in linhas_xls:
-            fd = f["fmt_total_text"] if tipo == "total" else f["fmt_group"]
-            fn = f["fmt_money_total"] if tipo == "total" else f["fmt_money"]
-            ws.write(row, 0, desc, fd)
-            ws.write_number(row, 1, ins, fn)
-            ws.write_number(row, 2, pag_bim, fn)
-            ws.write_number(row, 3, pag_ate, fn)
-            ws.write_number(row, 4, can_ate, fn)
-            ws.write_number(row, 5, aliq, fn)
-            ws.write_number(row, 6, liq, fn)
+        for fonte in fontes:
+            df_f = df_ref[df_ref["fonte"] == fonte]
+            vals = calcular_linha(df_f)
+            ws.write(row, 0, "TJMT/" + fonte, f["fmt_group"])
+            for c, v in enumerate(vals, 1):
+                ws.write_number(row, c, v, f["fmt_money"])
+                tot[c - 1] += v
             row += 1
 
-        ws.freeze_panes(2, 1)
+        # ---- TOTAL GERAL -----------------------------------------------
+        ws.write(row, 0, "TOTAL GERAL", f["fmt_total_text"])
+        for c, v in enumerate(tot, 1):
+            ws.write_number(row, c, v, f["fmt_money_total"])
+
+        ws.freeze_panes(3, 1)
     return output.getvalue()
 
 
