@@ -2577,73 +2577,98 @@ with tab5:
             st.divider()
 
             # ---- Tabela detalhada ------------------------------------------
-            if tipo_rp == "Por Credor":
-                st.markdown("#### Por Credor")
-                df_cred_tab = (df_rp_ref
+            def _grp_rp(df_src, grp_col):
+                """Agrega colunas de RP por coluna de agrupamento, separando A Pagar / A Liquidar."""
+                return (df_src
                     .assign(
-                        inscrito=df_rp_ref["proc_inscrito"] + df_rp_ref["np_inscrito"],
-                        pagos=df_rp_ref["proc_pagos"] + df_rp_ref["np_pagos"],
-                        cancelados=df_rp_ref["proc_cancelados"] + df_rp_ref["np_cancelados"],
-                        a_liquidar=df_rp_ref["proc_a_pagar"] + df_rp_ref["np_a_liquidar"],
+                        inscrito   = df_src["proc_inscrito"] + df_src["np_inscrito"],
+                        pagos      = df_src["proc_pagos"]    + df_src["np_pagos"],
+                        cancelados = df_src["proc_cancelados"] + df_src["np_cancelados"],
+                        a_pagar    = df_src["proc_a_pagar"]  + df_src["np_a_pagar"],
+                        em_liq     = df_src["np_em_liquidacao"],
+                        a_liquidar = df_src["np_a_liquidar"],
+                        np_ins_g   = df_src["np_inscrito"],
+                        np_can_g   = df_src["np_cancelados"],
                     )
-                    .groupby("nome_credor", as_index=False)
-                    .agg({"inscrito": "sum", "pagos": "sum", "cancelados": "sum", "a_liquidar": "sum"})
+                    .groupby(grp_col, as_index=False)
+                    .agg({
+                        "inscrito": "sum", "pagos": "sum", "cancelados": "sum",
+                        "a_pagar": "sum", "em_liq": "sum", "a_liquidar": "sum",
+                        "np_ins_g": "sum", "np_can_g": "sum",
+                    })
+                    .assign(np_liquidados=lambda d: (d["np_ins_g"] - d["a_liquidar"] - d["np_can_g"]).clip(lower=0))
+                    .drop(columns=["np_ins_g", "np_can_g"])
                     .sort_values("inscrito", ascending=False)
                 )
-                df_cred_tab["liquidados"] = (df_cred_tab["inscrito"]
-                    - df_cred_tab["a_liquidar"] - df_cred_tab["cancelados"]).clip(lower=0)
-                pct_tot = df_cred_tab["inscrito"].sum()
-                df_cred_tab["% Inscrito"] = df_cred_tab["inscrito"].apply(
+
+            def _fmt_grp(df_t, label_col, label_rename):
+                pct_tot = df_t["inscrito"].sum()
+                df_t["pct"] = df_t["inscrito"].apply(
                     lambda v: "{:.1f}%".format(v / pct_tot * 100) if pct_tot > 0 else "0.0%")
-                for col in ["inscrito", "pagos", "cancelados", "a_liquidar", "liquidados"]:
-                    df_cred_tab[col] = df_cred_tab[col].apply(lambda v: "R$ {:,.2f}".format(v))
-                df_cred_tab.rename(columns={
-                    "nome_credor": "Credor", "inscrito": "Inscrito",
-                    "pagos": "Pagos", "cancelados": "Cancelados",
-                    "a_liquidar": "A Liquidar", "liquidados": "Liquidados"
+                for c in ["inscrito", "pagos", "cancelados", "a_pagar", "em_liq", "a_liquidar", "np_liquidados"]:
+                    df_t[c] = df_t[c].apply(lambda v: "R$ {:,.2f}".format(v))
+                df_t.rename(columns={
+                    label_col: label_rename,
+                    "inscrito": "Inscrito", "pagos": "Pagos", "cancelados": "Cancelados",
+                    "a_pagar": "A Pagar (liq.)", "em_liq": "Em Liquidação",
+                    "a_liquidar": "NP A Liquidar", "np_liquidados": "NP Liquidados",
+                    "pct": "% Inscrito",
                 }, inplace=True)
-                st.dataframe(df_cred_tab, use_container_width=True, hide_index=True)
+                return df_t
+
+            if tipo_rp == "Por Credor":
+                st.markdown("#### Por Credor")
+                df_cred_tab = _grp_rp(df_rp_ref, "nome_credor")
+                st.dataframe(_fmt_grp(df_cred_tab, "nome_credor", "Credor"),
+                             use_container_width=True, hide_index=True)
 
             elif tipo_rp == "Por Dotação":
                 st.markdown("#### Por Dotação Orçamentária")
-                df_dot_tab = (df_rp_ref
-                    .assign(
-                        inscrito=df_rp_ref["proc_inscrito"] + df_rp_ref["np_inscrito"],
-                        pagos=df_rp_ref["proc_pagos"] + df_rp_ref["np_pagos"],
-                        cancelados=df_rp_ref["proc_cancelados"] + df_rp_ref["np_cancelados"],
-                        a_liquidar=df_rp_ref["proc_a_pagar"] + df_rp_ref["np_a_liquidar"],
-                    )
-                    .groupby("dotacao", as_index=False)
-                    .agg({"inscrito": "sum", "pagos": "sum", "cancelados": "sum", "a_liquidar": "sum"})
-                    .sort_values("inscrito", ascending=False)
-                )
-                df_dot_tab["liquidados"] = (df_dot_tab["inscrito"]
-                    - df_dot_tab["a_liquidar"] - df_dot_tab["cancelados"]).clip(lower=0)
-                for col in ["inscrito", "pagos", "cancelados", "a_liquidar", "liquidados"]:
-                    df_dot_tab[col] = df_dot_tab[col].apply(lambda v: "R$ {:,.2f}".format(v))
-                df_dot_tab.rename(columns={
-                    "dotacao": "Dotação", "inscrito": "Inscrito",
-                    "pagos": "Pagos", "cancelados": "Cancelados",
-                    "a_liquidar": "A Liquidar", "liquidados": "Liquidados"
-                }, inplace=True)
-                st.dataframe(df_dot_tab, use_container_width=True, hide_index=True)
+                df_dot_tab = _grp_rp(df_rp_ref, "dotacao")
+                st.dataframe(_fmt_grp(df_dot_tab, "dotacao", "Dotação"),
+                             use_container_width=True, hide_index=True)
 
             else:
                 st.markdown("#### Resumo Geral")
+                fv = lambda v: "R$ {:,.2f}".format(v)
                 resumo = pd.DataFrame([
-                    {"Tipo": "Processados",     "Inscrito": proc_ins, "Pagos": proc_pag,
-                     "Cancelados": proc_can, "A Liquidar / A Pagar": proc_apa,
-                     "Liquidados": max(0.0, proc_ins - proc_apa - proc_can)},
-                    {"Tipo": "Não Processados", "Inscrito": np_ins,   "Pagos": np_pag,
-                     "Cancelados": np_can, "A Liquidar / A Pagar": np_aliq,
-                     "Liquidados": max(0.0, np_ins - np_aliq - np_can)},
-                    {"Tipo": "TOTAL",           "Inscrito": tot_inscrito, "Pagos": tot_pagos,
-                     "Cancelados": tot_cancelados, "A Liquidar / A Pagar": tot_a_liquidar,
-                     "Liquidados": tot_liquidados},
+                    {
+                        "Tipo": "Processados",
+                        "Inscrito":      fv(proc_ins),
+                        "Pagos":         fv(proc_pag),
+                        "Cancelados":    fv(proc_can),
+                        "A Pagar":       fv(proc_apa),   # liquidados aguardando pagamento
+                        "Em Liquidação": "—",
+                        "A Liquidar":    "—",
+                        "NP Liquidados": "—",            # todos já são liquidados por definição
+                    },
+                    {
+                        "Tipo": "Não Processados",
+                        "Inscrito":      fv(np_ins),
+                        "Pagos":         fv(np_pag),
+                        "Cancelados":    fv(np_can),
+                        "A Pagar":       fv(np_apa),     # liquidados aguardando pagamento
+                        "Em Liquidação": fv(np_eliq),
+                        "A Liquidar":    fv(np_aliq),
+                        "NP Liquidados": fv(np_liquidados),
+                    },
+                    {
+                        "Tipo": "TOTAL",
+                        "Inscrito":      fv(tot_inscrito),
+                        "Pagos":         fv(tot_pagos),
+                        "Cancelados":    fv(tot_cancelados),
+                        "A Pagar":       fv(proc_apa + np_apa),
+                        "Em Liquidação": fv(np_eliq),
+                        "A Liquidar":    fv(np_aliq),
+                        "NP Liquidados": fv(np_liquidados),
+                    },
                 ])
-                for col in ["Inscrito", "Pagos", "Cancelados", "A Liquidar / A Pagar", "Liquidados"]:
-                    resumo[col] = resumo[col].apply(lambda v: "R$ {:,.2f}".format(v))
                 st.dataframe(resumo, use_container_width=True, hide_index=True)
+                st.caption(
+                    "**A Pagar** = liquidados aguardando pagamento (Proc. + NP).  "
+                    "**NP Liquidados** = NP inscrito − NP A Liquidar − Cancelados "
+                    "(⚑ gap de ~R$ 2,8M vs LRF é inerente à diferença FIP 226 × consulta direta FIPLAN)."
+                )
 
             st.divider()
 
@@ -2653,19 +2678,26 @@ with tab5:
                                     "proc_inscrito", "np_inscrito",
                                     "proc_pagos", "np_pagos",
                                     "proc_cancelados", "np_cancelados",
-                                    "proc_a_pagar", "np_a_liquidar"]].copy()
-                df_det["Inscrito"] = df_det["proc_inscrito"] + df_det["np_inscrito"]
-                df_det["Pagos"]    = df_det["proc_pagos"]    + df_det["np_pagos"]
+                                    "proc_a_pagar", "np_a_pagar",
+                                    "np_em_liquidacao", "np_a_liquidar"]].copy()
+                df_det["Inscrito"]   = df_det["proc_inscrito"] + df_det["np_inscrito"]
+                df_det["Pagos"]      = df_det["proc_pagos"]    + df_det["np_pagos"]
                 df_det["Cancelados"] = df_det["proc_cancelados"] + df_det["np_cancelados"]
-                df_det["A Liquidar"] = df_det["proc_a_pagar"] + df_det["np_a_liquidar"]
-                df_det["Liquidados"] = (df_det["Inscrito"] - df_det["A Liquidar"] - df_det["Cancelados"]).clip(lower=0)
+                df_det["A Pagar"]    = df_det["proc_a_pagar"]  + df_det["np_a_pagar"]
+                df_det["Em Liq."]    = df_det["np_em_liquidacao"]
+                df_det["A Liquidar"] = df_det["np_a_liquidar"]
+                df_det["NP Liquidados"] = (
+                    df_det["np_inscrito"] - df_det["np_a_liquidar"] - df_det["np_cancelados"]
+                ).clip(lower=0)
                 df_det = df_det[["num_empenho", "nome_credor", "dotacao",
-                                 "Inscrito", "Pagos", "Cancelados", "A Liquidar", "Liquidados"]]
+                                 "Inscrito", "Pagos", "Cancelados",
+                                 "A Pagar", "Em Liq.", "A Liquidar", "NP Liquidados"]]
                 df_det.rename(columns={
                     "num_empenho": "Empenho", "nome_credor": "Credor", "dotacao": "Dotação"
                 }, inplace=True)
                 df_det = df_det.sort_values("Inscrito", ascending=False)
-                for col in ["Inscrito", "Pagos", "Cancelados", "A Liquidar", "Liquidados"]:
+                for col in ["Inscrito", "Pagos", "Cancelados", "A Pagar",
+                            "Em Liq.", "A Liquidar", "NP Liquidados"]:
                     df_det[col] = df_det[col].apply(lambda v: "R$ {:,.2f}".format(v))
                 st.dataframe(df_det, use_container_width=True, hide_index=True)
 
