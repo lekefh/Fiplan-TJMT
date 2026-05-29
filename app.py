@@ -331,7 +331,7 @@ def gerar_excel_anexo1a(df_orc, df_exec, df_rec, meses_bim, meses_ate_agora):
     v_cor = somar(mask_cor); v_cor50 = somar(mask_cor50); v_cor90 = somar(mask_cor90)
     v_cap = somar(mask_cap); v_cap90 = somar(mask_cap90); v_intra = somar(mask_intra)
     v_sub = somar(mask_all); v_zero = {k: 0.0 for k in v_sub}
-    v_sup = {**v_zero, "emp_no_bim": max(receita_bim - v_sub["emp_no_bim"], 0), "emp_ate": max(receita_ate - v_sub["emp_ate"], 0), "liq_no_bim": max(receita_bim - v_sub["liq_no_bim"], 0), "liq_ate": max(receita_ate - v_sub["liq_ate"], 0), "pago_ate": max(receita_ate - v_sub["pago_ate"], 0)}
+    v_sup = {**v_zero, "emp_no_bim": receita_bim - v_sub["emp_no_bim"], "emp_ate": receita_ate - v_sub["emp_ate"], "liq_no_bim": max(receita_bim - v_sub["liq_no_bim"], 0), "liq_ate": max(receita_ate - v_sub["liq_ate"], 0), "pago_ate": max(receita_ate - v_sub["pago_ate"], 0)}
 
     linhas = [
         ("DESPESAS (EXCETO INTRA-ORCAMENTARIAS) (VIII)", somar(mask_cor | mask_cap) if not base.empty else v_zero, "total"),
