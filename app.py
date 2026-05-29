@@ -980,8 +980,8 @@ def gerar_excel_rp(df_rp, meses_bim, meses_ate_agora):
     def extrair_fonte(dotacao):
         try:
             partes = str(dotacao).split(".")
-            # Penúltima parte da dotação = FONTE (ex: ...1.176.0000 → "176")
-            return partes[-2].strip() if len(partes) >= 2 else "N/D"
+            # UG.FONTE = partes[-3] + "." + partes[-2] → ex: "1.760" e "2.760"
+            return (partes[-3] + "." + partes[-2]).strip() if len(partes) >= 3 else "N/D"
         except Exception:
             return "N/D"
 
@@ -2394,7 +2394,14 @@ with tab5:
     else:
         meses_rp_disp = sorted(df_rp["mes"].unique())
 
-        fc1, fc2, fc3 = st.columns([2, 2, 2])
+        def _ext_fonte_rp(dot):
+            try:
+                p = str(dot).split(".")
+                return (p[-3] + "." + p[-2]).strip() if len(p) >= 3 else "N/D"
+            except Exception:
+                return "N/D"
+
+        fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 2])
         ms_rp = fc1.multiselect(
             "Mês de referência:",
             meses_rp_disp,
@@ -2420,6 +2427,13 @@ with tab5:
         else:
             mes_ref_rp = max(ms_rp)
             df_rp_ref = df_rp[df_rp["mes"] == mes_ref_rp].copy()
+            df_rp_ref["_fonte"] = df_rp_ref["dotacao"].apply(_ext_fonte_rp)
+            fontes_disp_rp = sorted(df_rp_ref["_fonte"].unique())
+            fontes_sel = fc4.multiselect(
+                "Fonte:", fontes_disp_rp, default=fontes_disp_rp, key="fonte_rp"
+            )
+            if fontes_sel:
+                df_rp_ref = df_rp_ref[df_rp_ref["_fonte"].isin(fontes_sel)]
 
             # ---- Cálculos de totais ----------------------------------------
             proc_ins  = float(df_rp_ref["proc_inscrito"].sum())
@@ -2666,8 +2680,7 @@ with tab5:
                 st.dataframe(resumo, use_container_width=True, hide_index=True)
                 st.caption(
                     "**A Pagar** = liquidados aguardando pagamento (Proc. + NP).  "
-                    "**NP Liquidados** = NP inscrito − NP A Liquidar − Cancelados "
-                    "(⚑ gap de ~R$ 2,8M vs LRF é inerente à diferença FIP 226 × consulta direta FIPLAN)."
+                    "**NP Liquidados** = NP inscrito − NP A Liquidar − Cancelados."
                 )
 
             st.divider()
