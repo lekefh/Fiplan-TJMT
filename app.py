@@ -1593,11 +1593,22 @@ with st.sidebar:
     file_restore = st.file_uploader("Arquivo CSV", type=["csv"], key="file_rest")
     if file_restore and st.button("Restaurar"):
         df_res = pd.read_csv(file_restore)
+        # Garantir que só entra dados da UO 03101 (TJMT)
+        UO_PROJETO = "3101"
+        if "uo" in df_res.columns:
+            qtd_antes = len(df_res)
+            df_res = df_res[df_res["uo"].astype(str).str.lstrip("0") == UO_PROJETO.lstrip("0")]
+            filtradas = qtd_antes - len(df_res)
+            if filtradas > 0:
+                st.warning(
+                    f"{filtradas} linha(s) de outras UOs removidas — "
+                    f"apenas UO {UO_PROJETO} (TJMT) foi mantida."
+                )
         conn_r = sqlite3.connect(DB_NAME)
         df_res.to_sql(tabela_rest, conn_r, if_exists="replace", index=False)
         conn_r.commit()
         conn_r.close()
-        st.success("Tabela '" + tabela_rest + "' restaurada!")
+        st.success(f"Tabela '{tabela_rest}' restaurada! ({len(df_res)} linhas)")
         st.rerun()
 
     st.divider()
