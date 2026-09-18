@@ -167,7 +167,7 @@ def criar_formatos_excel(workbook):
 def preparar_base_receitas_lrf(df_rec, meses_bim, meses_ate_agora):
     if df_rec.empty:
         return pd.DataFrame(columns=["categoria", "natureza", "previsao_inicial", "previsao_atualizada", "no_bimestre", "ate_bimestre", "saldo", "perc_bim", "perc_ate"])
-    df_base = df_rec[~df_rec["codigo_full"].astype(str).str.startswith("9")].copy()
+    df_base = df_rec[df_rec["codigo_full"].astype(str).str.startswith(("1", "2"))].copy()
     chaves = ["categoria", "natureza"]
     df_orcado = df_base[df_base["mes"].isin(meses_ate_agora)].groupby(chaves, as_index=False).agg({"orcado": "max"}).rename(columns={"orcado": "previsao_atualizada"})
     df_orcado["previsao_inicial"] = df_orcado["previsao_atualizada"]
